@@ -1,7 +1,7 @@
 # test/e2e
 
-End-to-end suite for `dra-driver-nvidia-gpu` using Go + Ginkgo v2. Covers eight
-DRA allocation scenarios driven by CEL selectors and embedded YAML templates.
+End-to-end suite for `dra-driver-nvidia-gpu` using Go + Ginkgo v2. Covers nine
+DRA scenarios driven by CEL selectors and embedded YAML templates.
 
 ## Coverage
 
@@ -15,6 +15,7 @@ DRA allocation scenarios driven by CEL selectors and embedded YAML templates.
 | 6 | `[negative]` | Unmatchable selector leaves the pod Pending with no allocation. |
 | 7 | `[consumable-shares/unlimited]` | Multiple pods share the same GPU concurrently with `--consumable-shares=unlimited`. |
 | 8 | `[consumable-shares/memory]` | Multiple pods with explicit fractional memory requests share the same GPU with `--consumable-shares=memory`. |
+| 9 | `[device-status]` | KEP-4817: `ResourceClaim.status.devices` is published on prepare (uuid matches the ResourceSlice), untouched by a second consumer, and pruned after the last consumer goes away. Skipped unless the driver runs with `featureGates.ResourceClaimDeviceStatus=true`. |
 
 The suite detects GPU product / driver / memory from the published
 `ResourceSlice` at `BeforeSuite`, so it adapts to whatever hardware the CI
@@ -46,6 +47,7 @@ test/e2e/
 ├── README.md
 ├── suite_test.go              # Ginkgo bootstrap + GPU detection
 ├── gpu_allocation_test.go     # 8 It() specs
+├── device_status_test.go      # [device-status] spec (KEP-4817)
 └── framework/
     ├── client.go              # k8s client factory
     ├── gpu.go                 # ResourceSlice -> GPUDetails
@@ -54,6 +56,7 @@ test/e2e/
     └── specs/                 # embedded YAML templates
         ├── consumable-shares-memory.yaml.tmpl
         ├── consumable-shares-unlimited.yaml.tmpl
+        ├── device-status.yaml.tmpl
         ├── driver-version.yaml.tmpl
         ├── error-handling.yaml.tmpl
         ├── memory-size.yaml.tmpl

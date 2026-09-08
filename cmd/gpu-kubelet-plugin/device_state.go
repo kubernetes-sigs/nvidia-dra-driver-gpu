@@ -88,6 +88,13 @@ type DeviceState struct {
 
 	// Checkpoint read/write lock, file-based for multi-process synchronization.
 	cplock *flock.Flock
+
+	// Claim UIDs whose device statuses (KEP-4817) were successfully
+	// published, so that repeated Prepare() calls for a claim skip the API
+	// round-trip. In-memory only: after a plugin restart, the first Prepare()
+	// per claim re-checks (and no-ops when the status is already in place).
+	// Guarded by the DeviceState lock.
+	statusPublishedClaims map[string]bool
 }
 
 // newFabricManager opens a Fabric Manager connection when the
@@ -225,6 +232,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		checkpointManager: checkpointManager,
 		fmManager:         fmManager,
 		cplock:            flock.NewFlock(cpLockPath),
+
+		statusPublishedClaims: make(map[string]bool),
 	}
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
@@ -319,6 +328,11 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		// Prepare() must be idempotent, as it may be invoked more than once per
 		// claim (and actual device preparation must happen at most once).
 		klog.V(4).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
+		// Re-assert the device statuses: this heals a status write that
+		// failed during the original preparation. Free in steady state: once
+		// a publish succeeded for this claim, this returns without an API
+		// call (see publishDeviceStatuses).
+		s.publishDeviceStatuses(ctx, claim, preparedClaim.PreparedDevices)
 		return preparedClaim.PreparedDevices.GetDevices(), nil
 	}
 
@@ -398,6 +412,12 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 	klog.V(7).Infof("t_prep_ucp2 %.3f s", time.Since(tucp20).Seconds())
+
+	// KEP-4817: publish per-device status to the ResourceClaim. Best-effort
+	// (see publishDeviceStatuses); do this only after the claim reached
+	// PrepareCompleted so the status never describes a preparation that may
+	// still be rolled back.
+	s.publishDeviceStatuses(ctx, claim, preparedDevices)
 
 	return preparedDevices.GetDevices(), nil
 }
@@ -571,6 +591,12 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			return false, fmt.Errorf("error deactivating fabric partition: %w", err)
 		}
 	}
+
+	// KEP-4817: remove this driver's entries from the claim's device statuses
+	// so the claim does not keep advertising devices that are no longer
+	// prepared. Best-effort; the claim is typically already deleted, in which
+	// case this is a cheap noop.
+	s.clearDeviceStatuses(ctx, claimRef)
 
 	// TODOMIG: we delete per-claim CDI spec files here in the happy path. In
 	// regular operation, that means we don't leak files. However, upon program

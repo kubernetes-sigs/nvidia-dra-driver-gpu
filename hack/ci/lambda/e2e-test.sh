@@ -41,6 +41,10 @@ fi
 # These Alpha feature gates must be explicitly enabled on k8s 1.35+:
 #   DRAExtendedResource: allows nvidia.com/gpu in resources.limits (test_gpu_extres.bats)
 #   DRAPartitionableDevices: allows SharedCounters/ConsumesCounters in ResourceSlices (DynamicMIG)
+# DRAResourceClaimDeviceStatus lets the driver publish per-device status
+# (KEP-4817) into ResourceClaim.status.devices (test_gpu_device_status.bats).
+# Known since 1.32 and beta default-on since 1.33, so enabling it explicitly
+# is safe on all supported versions.
 if [ -n "${K8S_VERSION}" ]; then
   RESOLVED_K8S_VERSION="${K8S_VERSION}"
 else
@@ -49,8 +53,8 @@ fi
 K8S_MINOR=$(echo "${RESOLVED_K8S_VERSION}" | sed 's/v1\.\([0-9]*\)\..*/\1/')
 KUBEADM_FEATURE_GATES=""
 if [ "${K8S_MINOR}" -ge 35 ]; then
-  KUBEADM_FEATURE_GATES="DRAExtendedResource=true,DRAPartitionableDevices=true"
-  echo "K8s >= 1.35 (${RESOLVED_K8S_VERSION}): enabling DRAExtendedResource,DRAPartitionableDevices"
+  KUBEADM_FEATURE_GATES="DRAExtendedResource=true,DRAPartitionableDevices=true,DRAResourceClaimDeviceStatus=true"
+  echo "K8s >= 1.35 (${RESOLVED_K8S_VERSION}): enabling DRAExtendedResource,DRAPartitionableDevices,DRAResourceClaimDeviceStatus"
 fi
 
 # --- Compute git metadata before transfer ---

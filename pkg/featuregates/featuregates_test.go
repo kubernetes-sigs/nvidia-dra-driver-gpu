@@ -146,6 +146,7 @@ func TestDefaultFeatureGates(t *testing.T) {
 		// Test that real features have expected defaults
 		require.False(t, fg.Enabled(TimeSlicingSettings), "TimeSlicingSettings should be disabled by default (alpha)")
 		require.False(t, fg.Enabled(HostManagedIMEXDaemon), "HostManagedIMEXDaemon should be disabled by default (alpha)")
+		require.False(t, fg.Enabled(ResourceClaimDeviceStatus), "ResourceClaimDeviceStatus should be disabled by default (alpha)")
 	})
 }
 

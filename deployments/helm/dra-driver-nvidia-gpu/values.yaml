@@ -118,6 +118,8 @@ resources:
 #   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
+#   ResourceClaimDeviceStatus: false   # Publish per-device status (KEP-4817) into ResourceClaim.status.devices
+#                                      # (requires the DRAResourceClaimDeviceStatus Kubernetes feature gate)
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher

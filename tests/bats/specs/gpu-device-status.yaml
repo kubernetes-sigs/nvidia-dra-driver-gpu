@@ -1,0 +1,35 @@
+# Standalone (non-template) claim for the KEP-4817 device status test.
+# The claim outlives its consumer pods so the lifecycle of
+# ResourceClaim.status.devices across prepare / unprepare can be observed.
+# Mirrors test/e2e/framework/specs/device-status.yaml.tmpl.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: rc-device-status
+  labels:
+    env: batssuite
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-device-status-1
+  labels:
+    env: batssuite
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimName: rc-device-status

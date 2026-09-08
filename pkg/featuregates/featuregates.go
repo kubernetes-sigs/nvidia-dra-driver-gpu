@@ -103,6 +103,17 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// ResourceClaimDeviceStatus enables the kubelet plugin to publish
+	// per-device status (KEP-4817) into ResourceClaim.status.devices upon
+	// claim preparation: which physical GPU / MIG device a claim got (UUID,
+	// product name, driver version, MIG profile/parent). This gives a durable
+	// pod->device mapping that survives device removal from ResourceSlices.
+	// The cluster must have the Kubernetes feature gate
+	// DRAResourceClaimDeviceStatus enabled, and RBAC must allow the plugin to
+	// update resourceclaims/status (see the Helm chart, which grants this
+	// automatically when the gate is enabled via .Values.featureGates).
+	ResourceClaimDeviceStatus featuregate.Feature = "ResourceClaimDeviceStatus"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -199,6 +210,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	ResourceClaimDeviceStatus: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,

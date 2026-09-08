@@ -256,8 +256,12 @@ KINDEOF
 
 # Inject additional feature gates for k8s 1.35+
 if [ -n "${FEATURE_GATES}" ]; then
-  # Add DRA-specific feature gates to the Kind config
-  sed -i '/DynamicResourceAllocation: true/a\  DRAExtendedResource: true\n  DRAPartitionableDevices: true' "${KIND_CONFIG}"
+  # Add DRA-specific feature gates to the Kind config.
+  # DRAResourceClaimDeviceStatus lets the driver publish per-device status
+  # (KEP-4817) into ResourceClaim.status.devices (test_gpu_device_status.bats).
+  # Known since 1.32, beta default-on since 1.33, so setting it explicitly is
+  # safe on all supported versions.
+  sed -i '/DynamicResourceAllocation: true/a\  DRAExtendedResource: true\n  DRAPartitionableDevices: true\n  DRAResourceClaimDeviceStatus: true' "${KIND_CONFIG}"
 fi
 if [ "${TEST_DRA_LIST_TYPE_ATTRIBUTES}" = "true" ]; then
   sed -i '/DynamicResourceAllocation: true/a\  DRAListTypeAttributes: true' "${KIND_CONFIG}"

@@ -190,6 +190,7 @@ tests-mock-nvml: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_gpu_basic.bats \
 		tests/bats/test_gpu_cuda_workloads.bats \
+		tests/bats/test_gpu_device_status.bats \
 		tests/bats/test_gpu_sharing.bats \
 		tests/bats/test_gpu_robustness.bats \
 		tests/bats/test_gpu_extres.bats \
@@ -207,6 +208,7 @@ tests-gpu-single: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_gpu_basic.bats \
 		tests/bats/test_gpu_cuda_workloads.bats \
+		tests/bats/test_gpu_device_status.bats \
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_sharing.bats \
 		tests/bats/test_gpu_robustness.bats \
@@ -218,6 +220,7 @@ tests-gpu-a10: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_gpu_basic.bats \
 		tests/bats/test_gpu_cuda_workloads.bats \
+		tests/bats/test_gpu_device_status.bats \
 		tests/bats/test_gpu_sharing.bats \
 		tests/bats/test_gpu_robustness.bats \
 		tests/bats/test_gpu_extres.bats)
@@ -232,6 +235,7 @@ tests-gpu: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_basics.bats \
 		tests/bats/test_gpu_basic.bats \
+		tests/bats/test_gpu_device_status.bats \
 		tests/bats/test_gpu_extres.bats \
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_mig.bats \
@@ -255,6 +259,7 @@ tests: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_basics.bats \
 		tests/bats/test_gpu_basic.bats \
+		tests/bats/test_gpu_device_status.bats \
 		tests/bats/test_gpu_extres.bats \
 		tests/bats/test_gpu_stress.bats \
 		tests/bats/test_gpu_dynmig.bats \

@@ -1,0 +1,22 @@
+# Second consumer of the shared rc-device-status claim (see
+# gpu-device-status.yaml). Applied after the first pod is running to verify
+# that a repeated (idempotent) prepare leaves ResourceClaim.status.devices
+# untouched.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-device-status-2
+  labels:
+    env: batssuite
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimName: rc-device-status
