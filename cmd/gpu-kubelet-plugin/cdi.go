@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -62,6 +63,12 @@ type CDIHandler struct {
 	specCache *utilcache.Expiring
 
 	cdiRoot string
+
+	// Sysfs directory holding per-PCI-device state, used to inspect the
+	// driver a GPU is currently bound to. Defaults to `pciDevicesPath`; a
+	// field (and not the constant directly) so that tests can point this at a
+	// fake sysfs tree.
+	pciDevicesRoot string
 }
 
 func NewCDIHandler(opts ...cdiOption) (*CDIHandler, error) {
@@ -79,6 +86,9 @@ func NewCDIHandler(opts ...cdiOption) (*CDIHandler, error) {
 	}
 	if h.cdiRoot == "" {
 		h.cdiRoot = defaultCDIRoot
+	}
+	if h.pciDevicesRoot == "" {
+		h.pciDevicesRoot = pciDevicesPath
 	}
 	if h.nvdevice == nil {
 		h.nvdevice = nvdevice.New(h.nvml)
@@ -207,9 +217,41 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				// w/o compromising cache).
 				dspecsgpu, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
 				if err != nil {
-					return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
+					// NVML can only enumerate GPUs bound to the `nvidia` kernel
+					// driver. A GPU that has already been bound to a vfio-pci
+					// variant driver (`vfio-pci`, `nvgrace_gpu_vfio_pci`) by a
+					// passthrough consumer such as KubeVirt is invisible to NVML,
+					// so spec generation fails here with "device handle from UUID:
+					// Not Found". For a passthrough claim that is not a real error:
+					// the device is already in exactly the driver state the consumer
+					// wants, and the consumer plugs it into the VM by PCI address
+					// (from the ResourceClaim), not via the GPU's /dev/nvidia*
+					// nodes. Failing here instead wedges every future pod for this
+					// claim in Init forever (e.g. after a force-restart that leaves
+					// the GPU stranded on vfio). Make prepare idempotent w.r.t.
+					// driver binding: when the device is already vfio-bound, emit an
+					// empty device spec so preparation succeeds. Only swallow the
+					// error in that specific case; a genuine NVML failure on an
+					// nvidia-bound device is still surfaced.
+					if bdf := dev.Gpu.Info.pciBusID; bdf != "" && deviceBoundToVfio(cdi.pciDevicesRoot, bdf) {
+						klog.Warningf("GPU %s (%s) is bound to a vfio driver and not visible to NVML; emitting a minimal CDI device spec for %s (passthrough consumer handles the device by PCI address)", uuid, bdf, dname)
+						// CDI rejects a device with no container edits ("invalid device,
+						// empty device edits"), which would fail spec writing and leave the
+						// claim stuck retrying. The passthrough consumer (e.g. KubeVirt)
+						// attaches the GPU by PCI address, so no /dev/nvidia* nodes or driver
+						// mounts are needed here; inject a single inert marker env var so the
+						// device is valid.
+						dspec = cdispec.Device{
+							ContainerEdits: cdispec.ContainerEdits{
+								Env: []string{"NVIDIA_DRA_GPU_VFIO_PASSTHROUGH=" + bdf},
+							},
+						}
+					} else {
+						return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
+					}
+				} else {
+					dspec = dspecsgpu[0]
 				}
-				dspec = dspecsgpu[0]
 			}
 
 			if dev.Type() == VfioDeviceType {
@@ -303,6 +345,20 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 
 	klog.V(7).Infof("t_gen_write_cdi_spec %.3f s", time.Since(tws0).Seconds())
 	return result
+}
+
+// deviceBoundToVfio reports whether the PCI device at the given bus ID is
+// currently bound to a vfio-pci variant driver (e.g. "vfio-pci" or the
+// Grace-Hopper "nvgrace_gpu_vfio_pci"). Such a device is invisible to NVML but
+// is exactly what a passthrough consumer expects. A read error (device gone,
+// no driver bound) reports false so we do not mask unrelated failures.
+func deviceBoundToVfio(pciDevicesRoot, pciAddress string) bool {
+	driver, err := getDriver(pciDevicesRoot, pciAddress)
+	if err != nil {
+		klog.V(6).Infof("could not determine PCI driver binding for %s: %v", pciAddress, err)
+		return false
+	}
+	return strings.Contains(driver, "vfio")
 }
 
 func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
