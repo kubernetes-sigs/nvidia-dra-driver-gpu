@@ -79,3 +79,31 @@ func WaitForPodsReady(ctx context.Context, cs *kubernetes.Clientset, ns, labelSe
 	})
 	return ready, err
 }
+
+// WaitForPodReady waits until a named Pod is Running and every container is
+// Ready. It is useful for workloads which must remain running while their
+// logs or DRA allocation are inspected.
+func WaitForPodReady(ctx context.Context, cs *kubernetes.Clientset, ns, name string, timeout time.Duration) error {
+	err := wait.PollUntilContextTimeout(ctx, DefaultPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
+		pod, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) == 0 {
+			return false, nil
+		}
+		for _, status := range pod.Status.ContainerStatuses {
+			if !status.Ready {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("pod %s/%s never became Ready: %w", ns, name, err)
+	}
+	return nil
+}

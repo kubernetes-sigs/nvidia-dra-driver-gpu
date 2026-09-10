@@ -1,0 +1,31 @@
+# Migrated from tests/bats/specs/gpu-anymig.yaml.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: rct-anymig
+  namespace: {{ .Namespace }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: anymig
+        exactly:
+          deviceClassName: mig.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-anymig
+  namespace: {{ .Namespace }}
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: migdev
+  resourceClaims:
+  - name: migdev
+    resourceClaimTemplateName: rct-anymig
