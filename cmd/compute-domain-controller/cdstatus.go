@@ -308,7 +308,7 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 		return
 	}
 
-	klog.Infof("CliqueCleanup: removing stale daemon entries from clique %s/%s: %v", clique.Namespace, clique.Name, removedNodes)
+	klog.V(1).Infof("CliqueCleanup: removing stale daemon entries from clique %s/%s: %v", clique.Namespace, clique.Name, removedNodes)
 
 	// Update the clique with the filtered daemon list
 	newClique := clique.DeepCopy()
@@ -319,7 +319,7 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 		return
 	}
 
-	klog.Infof("CliqueCleanup: successfully removed %d stale daemon entries from clique %s/%s", len(removedNodes), clique.Namespace, clique.Name)
+	klog.V(1).Infof("CliqueCleanup: successfully removed %d stale daemon entries from clique %s/%s", len(removedNodes), clique.Namespace, clique.Name)
 }
 
 // filterStaleNodes removes nodes from CD status if their pod no longer exists.

@@ -100,7 +100,7 @@ func (q *WorkQueue) EnqueueRaw(obj any, callback func(ctx context.Context, obj a
 func (q *WorkQueue) Enqueue(obj any, callback func(ctx context.Context, obj any) error) {
 	runtimeObj, ok := obj.(runtime.Object)
 	if !ok {
-		klog.Warningf("unexpected object type %T: runtime.Object required", obj)
+		klog.Errorf("unexpected object type %T: runtime.Object required", obj)
 		return
 	}
 
@@ -128,7 +128,7 @@ func (q *WorkQueue) EnqueueRawWithKey(obj any, key string, callback func(ctx con
 func (q *WorkQueue) EnqueueWithKey(obj any, key string, callback func(ctx context.Context, obj any) error) {
 	runtimeObj, ok := obj.(runtime.Object)
 	if !ok {
-		klog.Warningf("unexpected object type %T: runtime.Object required", obj)
+		klog.Errorf("unexpected object type %T: runtime.Object required", obj)
 		return
 	}
 
@@ -168,11 +168,11 @@ func (q *WorkQueue) processNextWorkItem(ctx context.Context) {
 		// Most often, this is an expected, retryable error in the context of an
 		// eventually consistent system. Hence, do not log on an error level. Rely
 		// on inner business logic to log unexpected errors on an error level.
-		klog.Infof("Reconcile: %v (attempt %d)", err, attempts)
+		klog.V(1).Infof("Reconcile: %v (attempt %d)", err, attempts)
 		// Only retry if we're still the current operation for this key
 		q.Lock()
 		if q.activeOps[workItem.Key] != nil && q.activeOps[workItem.Key] != workItem {
-			klog.Infof("Do not re-enqueue failed work item with key '%s': a newer item was enqueued", workItem.Key)
+			klog.V(1).Infof("Do not re-enqueue failed work item with key '%s': a newer item was enqueued", workItem.Key)
 			q.queue.Forget(workItem)
 		} else {
 			q.queue.AddRateLimited(workItem)

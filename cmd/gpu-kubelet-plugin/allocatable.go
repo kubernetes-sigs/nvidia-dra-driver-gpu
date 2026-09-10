@@ -280,7 +280,7 @@ func (d *PerGPUAllocatableDevices) AddAllocatableDevice(allocatable *Allocatable
 	if _, ok := d.allocatablesMap[pciBusID]; !ok {
 		d.allocatablesMap[pciBusID] = make(AllocatableDevices)
 	}
-	klog.Infof("Adding allocatable device %q for PCI bus ID: %s", allocatable.CanonicalName(), pciBusID)
+	klog.V(4).Infof("Adding allocatable device %q for PCI bus ID: %s", allocatable.CanonicalName(), pciBusID)
 	d.allocatablesMap[pciBusID][allocatable.CanonicalName()] = allocatable
 	return nil
 }

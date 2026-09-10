@@ -107,7 +107,7 @@ func (m *DNSNameManager) LogDNSNameMappings() {
 	defer m.Unlock()
 
 	if len(m.ipToDNSName) == 0 {
-		klog.Infof("Current compute-domain-daemon mappings: empty")
+		klog.V(2).Infof("Current compute-domain-daemon mappings: empty")
 		return
 	}
 
@@ -124,7 +124,7 @@ func (m *DNSNameManager) LogDNSNameMappings() {
 
 	for _, ip := range ips {
 		dnsname := m.ipToDNSName[ip]
-		klog.Infof("%s -> %s", dnsname, ip)
+		klog.V(2).Infof("%s -> %s", dnsname, ip)
 	}
 }
 

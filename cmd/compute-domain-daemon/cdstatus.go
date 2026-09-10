@@ -336,7 +336,7 @@ func (m *ComputeDomainStatusManager) maybePushNodesUpdate(cd *nvapi.ComputeDomai
 	// wait for all 'numNodes' nodes to show up before sending an update.
 	if !featuregates.Enabled(featuregates.IMEXDaemonsWithDNSNames) {
 		if len(cd.Status.Nodes) != cd.Spec.NumNodes {
-			klog.Infof("numNodes: %d, nodes seen: %d", cd.Spec.NumNodes, len(cd.Status.Nodes))
+			klog.V(1).Infof("numNodes: %d, nodes seen: %d", cd.Spec.NumNodes, len(cd.Status.Nodes))
 			return
 		}
 	}

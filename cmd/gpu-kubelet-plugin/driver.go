@@ -450,7 +450,7 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 		}
 	}
 
-	klog.Infof("Returning newly prepared devices for claim '%s': %v", cs, devs)
+	klog.V(1).Infof("Returning newly prepared devices for claim '%s': %v", cs, devs)
 	drametrics.ObserveRequest(DriverName, "prepare", time.Since(t0))
 	return kubeletplugin.PrepareResult{Devices: devs}
 }
@@ -504,7 +504,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 		//
 		// TODO: implement error handler for bad slices:
 		// https://github.com/kubernetes/kubernetes/commit/a171795e313ee9f407fef4897c1a1e2052120991
-		klog.V(1).Infof("featuregates.DynamicMIG enabled: construct ResourceSlice objects according to KEP 4815 (partitionable devices)")
+		klog.V(4).Infof("featuregates.DynamicMIG enabled: construct ResourceSlice objects according to KEP 4815 (partitionable devices)")
 		resources := d.GenerateDriverResources(config.flags.nodeName)
 		if err := d.pluginhelper.PublishResources(ctx, resources); err != nil {
 			return err

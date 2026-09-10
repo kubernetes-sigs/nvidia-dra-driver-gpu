@@ -142,7 +142,7 @@ func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 	}
 
 	klog.V(7).Info("Health check: success: got NodePrepareResourcesResponse for noop request")
-	klog.V(6).Infof("Current kubelet plugin registration status: %s", h.kphelper.RegistrationStatus())
+	klog.V(7).Infof("Current kubelet plugin registration status: %s", h.kphelper.RegistrationStatus())
 
 	status.Status = grpc_health_v1.HealthCheckResponse_SERVING
 	return status, nil

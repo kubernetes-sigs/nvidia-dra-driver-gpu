@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
@@ -344,6 +345,13 @@ func (m *ComputeDomainManager) isCurrentNodeReadyInClique(ctx context.Context, c
 
 	clique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.flags.namespace).Get(ctx, cliqueName, metav1.GetOptions{})
 	if err != nil {
+		if errors.IsNotFound(err) {
+			// The clique is created by the compute-domain daemon. Until it
+			// exists, Prepare() keeps retrying, so this is an expected
+			// transient state rather than a failure.
+			klog.V(1).Infof("ComputeDomainClique %s not created yet", cliqueName)
+			return false
+		}
 		klog.Errorf("error getting ComputeDomainClique %s: %v", cliqueName, err)
 		return false
 	}
@@ -580,7 +588,7 @@ func (m *ComputeDomainManager) periodicCleanup(ctx context.Context) {
 					continue
 				}
 
-				klog.V(6).Infof("Stale directory found for ComputeDomain '%s', running cleanup", uid)
+				klog.V(1).Infof("Stale directory found for ComputeDomain '%s', running cleanup", uid)
 
 				if err := os.RemoveAll(path); err != nil {
 					klog.Errorf("error removing artifacts directory for ComputeDomain '%s': %v", uid, err)

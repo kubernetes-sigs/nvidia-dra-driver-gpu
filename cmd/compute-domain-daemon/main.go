@@ -447,7 +447,7 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// Spawn child, collect standard streams.
 	outerr, err := cmd.CombinedOutput()
 	if err != nil {
-		klog.Errorf("%s failed (%s), stdout/err: %s", imexCtlBinaryName, err, outerr)
+		klog.V(1).Infof("%s failed (%s), stdout/err: %s", imexCtlBinaryName, err, outerr)
 		return fmt.Errorf("IMEX daemon check failed: error running %s: %w", imexCtlBinaryName, err)
 	}
 
@@ -529,7 +529,7 @@ func logNodesConfig() error {
 	if err != nil {
 		return fmt.Errorf("failed to read nodes config: %w", err)
 	}
-	klog.Infof("Current %s:\n%s", imexDaemonNodesConfigPath, string(content))
+	klog.V(2).Infof("Current %s:\n%s", imexDaemonNodesConfigPath, string(content))
 	return nil
 }
 

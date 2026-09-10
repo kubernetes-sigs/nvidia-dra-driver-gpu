@@ -1435,7 +1435,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 		}
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
 		if device == nil {
-			klog.V(6).Infof("allocatable not found for device %q", r.Device)
+			klog.Warningf("allocatable not found for device %q", r.Device)
 			continue
 		}
 		switch device.Type() {

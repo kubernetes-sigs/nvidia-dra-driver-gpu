@@ -232,7 +232,7 @@ func (l deviceLib) getCliqueIDLegacy() (string, error) {
 		}
 
 		if !isFabricAttached {
-			klog.Infof("no-clique fallback: fabric not attached (device %d/%s)", i, duid)
+			klog.V(4).Infof("no-clique fallback: fabric not attached (device %d/%s)", i, duid)
 			return nil
 		}
 
@@ -255,7 +255,7 @@ func (l deviceLib) getCliqueIDLegacy() (string, error) {
 
 		uniqueClusterUUIDs[clusterUUID.String()] = struct{}{}
 		uniqueCliqueIDs[cliqueID] = struct{}{}
-		klog.Infof("identified fabric clique UUID/ID (device %d/%s): %s/%s", i, duid, clusterUUID.String(), cliqueID)
+		klog.V(4).Infof("identified fabric clique UUID/ID (device %d/%s): %s/%s", i, duid, clusterUUID.String(), cliqueID)
 
 		return nil
 	})
@@ -303,7 +303,7 @@ func (l deviceLib) getCliqueIDStrict() (string, error) {
 		// https://docs.nvidia.com/deploy/nvml-api/group__nvmlFabricDefs.html
 		info, ret := d.GetGpuFabricInfo()
 		if ret == nvml.ERROR_NOT_SUPPORTED {
-			klog.Infof("no-clique fallback: NVLink fabric not supported by driver (device %d/%s, error: ERROR_NOT_SUPPORTED)", i, duid)
+			klog.V(4).Infof("no-clique fallback: NVLink fabric not supported by driver (device %d/%s, error: ERROR_NOT_SUPPORTED)", i, duid)
 			return nil
 		}
 
@@ -312,7 +312,7 @@ func (l deviceLib) getCliqueIDStrict() (string, error) {
 		}
 
 		if info.State == nvml.GPU_FABRIC_STATE_NOT_SUPPORTED {
-			klog.Infof("no-clique fallback: NVLink fabric not supported by device (device %d/%s, error: GPU_FABRIC_STATE_NOT_SUPPORTED)", i, duid)
+			klog.V(4).Infof("no-clique fallback: NVLink fabric not supported by device (device %d/%s, error: GPU_FABRIC_STATE_NOT_SUPPORTED)", i, duid)
 			return nil
 		}
 
@@ -323,7 +323,7 @@ func (l deviceLib) getCliqueIDStrict() (string, error) {
 			// partition they belong to is activated. We are blanket ignoring this state as
 			// we can't yet differentiate between real NVLink failures and this scenario.
 			if featuregates.Enabled(featuregates.FabricManagerPartitioning) && l.isSingleNodeNVLinkSystem {
-				klog.Infof("no-clique fallback: ignoring incomplete NVLink registration (device=%d/%s, state=%d) on single-node NVLink system", i, duid, info.State)
+				klog.V(4).Infof("no-clique fallback: ignoring incomplete NVLink registration (device=%d/%s, state=%d) on single-node NVLink system", i, duid, info.State)
 				return nil
 			}
 			return fmt.Errorf("NVLink fabric not attached (device %d/%s): state=%d, refusing to start", i, duid, info.State)
@@ -337,7 +337,7 @@ func (l deviceLib) getCliqueIDStrict() (string, error) {
 		// Cluster UUID with zero value: treat as MNNVL not supported. Expected
 		// for systems which are NVLink-capable, but not MNNVL-capable.
 		if info.ClusterUuid == [16]uint8{} {
-			klog.Infof("no-clique fallback: cluster UUID is zero, treat as fabric not attached (device %d/%s)", i, duid)
+			klog.V(4).Infof("no-clique fallback: cluster UUID is zero, treat as fabric not attached (device %d/%s)", i, duid)
 			return nil
 		}
 
@@ -352,7 +352,7 @@ func (l deviceLib) getCliqueIDStrict() (string, error) {
 
 		uniqueClusterUUIDs[clusterUUID.String()] = struct{}{}
 		uniqueCliqueIDs[cliqueID] = struct{}{}
-		klog.Infof("identified fabric clique UUID/ID (device %d/%s): %s/%s", i, duid, clusterUUID.String(), cliqueID)
+		klog.V(4).Infof("identified fabric clique UUID/ID (device %d/%s): %s/%s", i, duid, clusterUUID.String(), cliqueID)
 
 		return nil
 	})

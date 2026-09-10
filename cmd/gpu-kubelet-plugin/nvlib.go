@@ -676,7 +676,7 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 			vfioDeviceInfo.parent = parent.Gpu
 		} else {
 			// Its likely that the parent is nil because the GPU is prepared in passthrough mode.
-			klog.Warningf("Skipping association with parent GPU device for VFIO device: %s", pci.Address)
+			klog.V(4).Infof("Skipping association with parent GPU device for VFIO device: %s", pci.Address)
 		}
 
 		allocatableDevice := &AllocatableDevice{
@@ -1163,7 +1163,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// A previous, partial cleanup may actually have already deleted that. Seen
 	// in practice. Ignore, and proceed with deleting GPU instance below.
 	if cires == nvml.ERROR_NOT_FOUND {
-		klog.Infof("Delete %s: CI not found, ignore", migStr)
+		klog.V(6).Infof("Delete %s: CI not found, ignore", migStr)
 	} else {
 		ret := ci.Destroy()
 		if ret != nvml.SUCCESS {
@@ -1212,7 +1212,7 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 
 	// On Ampere/A100, SetMigMode sets a pending mode that requires a GPU reset to activate — leave MIG enabled.
 	if !supportsMIGModeToggle(nvmldev) {
-		klog.Infof("GPU %s (%s): skipping MIG mode disable (architecture does not support reset-less MIG toggling)",
+		klog.V(6).Infof("GPU %s (%s): skipping MIG mode disable (architecture does not support reset-less MIG toggling)",
 			gpu.String(), gpu.architecture)
 		return nil
 	}
@@ -1332,7 +1332,7 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 	for i := range count {
 		migHandle, ret := parent.GetMigDeviceHandleByIndex(i)
 		if ret != nvml.SUCCESS {
-			klog.Infof("GetMigDeviceHandleByIndex ret not success")
+			klog.V(7).Infof("GetMigDeviceHandleByIndex ret not success")
 			// Slot empty or invalid: treat as device does not currently exist.
 			continue
 		}
@@ -1393,11 +1393,11 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 			MigUUID:     uuid,
 		}
 
-		klog.Infof("FindMigDevBySpec result: %+v", mlt)
+		klog.V(4).Infof("FindMigDevBySpec result: %+v", mlt)
 		return &mlt, nil
 	}
 
-	klog.Infof("Iterated through all potential MIG devs -- no candidate found")
+	klog.V(4).Infof("Iterated through all potential MIG devs -- no candidate found")
 	return nil, nil
 }
 
@@ -1475,7 +1475,7 @@ func (l deviceLib) enableGPUPersistenceMode(pciAddress string) error {
 		return fmt.Errorf("error getting persistence mode: %w", ret)
 	}
 	if mode == nvml.FEATURE_ENABLED {
-		klog.Infof("Persistence mode is already enabled for GPU PCI device %s", pciAddress)
+		klog.V(4).Infof("Persistence mode is already enabled for GPU PCI device %s", pciAddress)
 		return nil
 	}
 

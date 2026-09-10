@@ -201,7 +201,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		// Associated device(s) has/ave been prepared by us. Prepare() must be
 		// idempotent, as it may be invoked more than once per claim (and actual
 		// device preparation must happen at most once).
-		klog.V(4).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
+		klog.V(2).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
 		return preparedClaim.PreparedDevices.GetDevices(), nil
 	}
 	if exists && preparedClaim.CheckpointState == ClaimCheckpointStatePrepareAborted && claimMatchesPreparedClaim(preparedClaim, claim) {

@@ -141,7 +141,7 @@ func (m *NodeManager) RemoveComputeDomainLabels(ctx context.Context, cdUID strin
 	}
 
 	if len(names) > 0 {
-		klog.V(6).Infof("Removed label(s) for CD %v from node(s): %v", cdUID, strings.Join(names, ", "))
+		klog.V(1).Infof("Removed label(s) for CD %v from node(s): %v", cdUID, strings.Join(names, ", "))
 	}
 
 	return nil

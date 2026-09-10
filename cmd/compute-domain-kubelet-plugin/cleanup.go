@@ -180,7 +180,7 @@ func (m *CheckpointCleanupManager) unprepareIfStale(ctx context.Context, cpuid s
 	// A transient error during API server lookup. No explicit retry required.
 	// The next periodic cleanup invocation will implicitly retry.
 	if err != nil {
-		klog.Infof("Checkpointed RC cleanup: skip for checkpointed claim %s: getClaimByName failed (retry later): %s", cpuid, err)
+		klog.V(1).Infof("Checkpointed RC cleanup: skip for checkpointed claim %s: getClaimByName failed (retry later): %s", cpuid, err)
 		return
 	}
 
@@ -221,7 +221,7 @@ func (m *CheckpointCleanupManager) unprepare(ctx context.Context, uid string, cl
 		return
 	}
 
-	klog.Infof("Checkpointed RC cleanup: unprepared stale claim: %s", claimRef.String())
+	klog.V(1).Infof("Checkpointed RC cleanup: unprepared stale claim: %s", claimRef.String())
 }
 
 // getClaimByName() attempts to fetch a ResourceClaim object directly from the

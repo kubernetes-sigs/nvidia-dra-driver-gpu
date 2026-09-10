@@ -190,11 +190,11 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 					return nil
 				}
 				err = fmt.Errorf("unexpected error checking if gpu device %q is free: %w", info.PciBusID, cmdErr)
-				klog.V(6).Infof("[DEBUG] %s", err.Error())
+				klog.V(6).Infof("%v", err)
 				continue
 			}
 			err = fmt.Errorf("gpu device %q has open fds by process(es): %q", info.PciBusID, string(out))
-			klog.V(6).Infof("[DEBUG] %s", err.Error())
+			klog.V(6).Infof("%v", err)
 		}
 	}
 }
