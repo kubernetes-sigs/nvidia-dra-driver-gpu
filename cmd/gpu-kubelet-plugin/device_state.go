@@ -347,7 +347,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	err = s.updateCheckpoint(ctx, func(cp *Checkpoint) {
 		cp.V2.PreparedClaims[claimUID] = PreparedClaim{
 			CheckpointState: ClaimCheckpointStatePrepareStarted,
-			Status:          claim.Status,
+			Status:          ownedStatus(claim.Status),
 			Name:            claim.Name,
 			Namespace:       claim.Namespace,
 		}
@@ -389,7 +389,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	err = s.updateCheckpoint(ctx, func(cp *Checkpoint) {
 		cp.V2.PreparedClaims[claimUID] = PreparedClaim{
 			CheckpointState: ClaimCheckpointStatePrepareCompleted,
-			Status:          claim.Status,
+			Status:          ownedStatus(claim.Status),
 			PreparedDevices: preparedDevices,
 		}
 	})
@@ -1983,6 +1983,34 @@ func (s *DeviceState) IsMigCapable() bool {
 		}
 	}
 	return false
+}
+
+// ownedStatus is claim.Status with the allocation results of other drivers
+// dropped. What we checkpoint is this driver's own view of the claim, and
+// everything reading it back treats a result as a device we placed.
+func ownedStatus(status resourceapi.ResourceClaimStatus) resourceapi.ResourceClaimStatus {
+	if status.Allocation == nil {
+		return status
+	}
+	results := status.Allocation.Devices.Results
+	owned := make([]resourceapi.DeviceRequestAllocationResult, 0, len(results))
+	var dropped []string
+	for _, r := range results {
+		if r.Driver == DriverName {
+			owned = append(owned, r)
+			continue
+		}
+		dropped = append(dropped, fmt.Sprintf("%s/%s", r.Driver, r.Device))
+	}
+	if len(dropped) == 0 {
+		return status
+	}
+	klog.V(2).Infof("Checkpointing claim without %d result(s) of other drivers: %v", len(dropped), dropped)
+
+	// The claim is the informer cache's copy, so the filtered view must be ours.
+	out := *status.DeepCopy()
+	out.Allocation.Devices.Results = owned
+	return out
 }
 
 func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {

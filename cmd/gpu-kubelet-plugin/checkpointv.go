@@ -112,7 +112,7 @@ func (v1 *CheckpointV1) ToV2() *CheckpointV2 {
 	for claimUID, v1Claim := range v1.PreparedClaims {
 		v2.PreparedClaims[claimUID] = PreparedClaimV2{
 			CheckpointState: ClaimCheckpointStatePrepareCompleted,
-			Status:          v1Claim.Status,
+			Status:          ownedStatus(v1Claim.Status),
 			PreparedDevices: v1Claim.PreparedDevices,
 		}
 	}

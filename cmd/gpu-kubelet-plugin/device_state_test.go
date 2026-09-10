@@ -659,6 +659,89 @@ func TestValidateAdminAccessRequest(t *testing.T) {
 	}
 }
 
+func TestOwnedStatusKeepsOnlyOurResults(t *testing.T) {
+	statusWith := func(results ...resourceapi.DeviceRequestAllocationResult) resourceapi.ResourceClaimStatus {
+		return resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+			Devices: resourceapi.DeviceAllocationResult{Results: results},
+		}}
+	}
+
+	t.Run("an unallocated claim is left alone", func(t *testing.T) {
+		require.Nil(t, ownedStatus(resourceapi.ResourceClaimStatus{}).Allocation)
+	})
+
+	t.Run("results of other drivers are dropped", func(t *testing.T) {
+		in := statusWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "foreign-0"},
+			resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-0"},
+		)
+
+		got := ownedStatus(in)
+
+		require.Equal(t,
+			[]resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "gpu-0"}},
+			got.Allocation.Devices.Results)
+	})
+
+	// claim.Status comes from the informer cache, so filtering must not reach it.
+	t.Run("the claim we were handed is not modified", func(t *testing.T) {
+		in := statusWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "foreign-0"},
+			resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-0"},
+		)
+
+		_ = ownedStatus(in)
+
+		require.Len(t, in.Allocation.Devices.Results, 2)
+	})
+
+	// Every claim a single-driver node sees takes this path, so it must not pay
+	// for a copy of the status.
+	t.Run("a claim that is all ours is handed straight back", func(t *testing.T) {
+		in := statusWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-0"})
+
+		got := ownedStatus(in)
+
+		require.Same(t, in.Allocation, got.Allocation)
+	})
+
+	t.Run("an allocation with no results keeps having none", func(t *testing.T) {
+		in := resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{}}
+
+		got := ownedStatus(in)
+
+		require.Nil(t, got.Allocation.Devices.Results)
+	})
+
+	t.Run("a claim with nothing of ours ends up empty", func(t *testing.T) {
+		in := statusWith(resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "foreign-0"})
+
+		got := ownedStatus(in)
+
+		require.Empty(t, got.Allocation.Devices.Results)
+	})
+}
+
+// An upgrade converts the checkpoint on read, which is a write of our own.
+func TestCheckpointV1ToV2KeepsOnlyOurResults(t *testing.T) {
+	v1 := &CheckpointV1{PreparedClaims: PreparedClaimsByUIDV1{
+		"claim-uid": {Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+					{Driver: "other.driver.com", Device: "foreign-0"},
+					{Driver: DriverName, Device: "gpu-0"},
+				}},
+			},
+		}},
+	}}
+
+	v2 := v1.ToV2()
+
+	require.Equal(t,
+		[]resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "gpu-0"}},
+		v2.PreparedClaims["claim-uid"].Status.Allocation.Devices.Results)
+}
+
 func TestIsAdminAccessIgnoresOtherDrivers(t *testing.T) {
 	results := []resourceapi.DeviceRequestAllocationResult{
 		{Driver: "other.driver.com", AdminAccess: ptr.To(true)},
