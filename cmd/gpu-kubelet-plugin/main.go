@@ -34,6 +34,9 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 
+	_ "k8s.io/component-base/metrics/prometheus/restclient" // for client metric registration
+	_ "k8s.io/component-base/metrics/prometheus/workqueue"  // register work queues in the default legacy registry
+
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/info"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
