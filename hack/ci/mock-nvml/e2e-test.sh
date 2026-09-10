@@ -17,9 +17,9 @@
 #
 # This is the mock-NVML equivalent of hack/ci/lambda/e2e-test.sh. Instead of
 # running on Lambda Cloud instances with real GPUs, it:
-#   1. Sets up mock NVML on the local host (or Kind node)
-#   2. Creates a Kind cluster with DRA support
-#   3. Installs the nvml-mock Helm chart to expose fake GPUs
+#   1. Creates a Kind cluster with DRA support
+#   2. Builds mock NVML in a disposable Linux container and installs it in Kind
+#   3. Installs the DRA driver Helm chart configured for mock NVML
 #   4. Builds and loads the DRA driver image
 #   5. Runs the BATS test suite with appropriate filters
 #
@@ -34,7 +34,7 @@
 #   - Kind (or will be installed)
 #   - Helm (or will be installed)
 #   - kubectl (or will be installed)
-#   - Go 1.25+ (for building mock NVML)
+#   - Go 1.25+ (for building the driver and installing missing tools)
 #   - k8s-test-infra checkout (for mock NVML source)
 #
 # Environment:
@@ -45,6 +45,8 @@
 #   KIND_CLUSTER_NAME   Kind cluster name (default: mock-nvml-test)
 #   ARTIFACTS           Artifact output directory (default: /tmp/mock-nvml-artifacts)
 #   SKIP_CLEANUP        Don't delete cluster on exit (default: false)
+#   MOCK_GPU_BUILDER_IMAGE
+#                       Linux image used to build the mock GPU payload
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -58,6 +60,7 @@ K8S_VERSION="${K8S_VERSION:-}"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-mock-nvml-test}"
 ARTIFACTS="${ARTIFACTS:-/tmp/mock-nvml-artifacts}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
+KIND_NODE_CONTAINER="${KIND_CLUSTER_NAME}-control-plane"
 
 GIT_COMMIT_SHORT="$(git -C "${REPO_ROOT}" rev-parse --short=8 HEAD)"
 export GIT_COMMIT_SHORT
@@ -71,6 +74,7 @@ echo "K8s version: ${K8S_VERSION:-latest}"
 echo "Cluster:     ${KIND_CLUSTER_NAME}"
 echo "Artifacts:   ${ARTIFACTS}"
 echo "Commit:      ${GIT_COMMIT_SHORT}"
+echo "Mock setup:  direct to Kind node"
 
 # --- Cleanup on exit ---
 cleanup() {
@@ -82,8 +86,6 @@ cleanup() {
   if [ "${SKIP_CLEANUP}" != "true" ]; then
     echo "=== Deleting Kind cluster ==="
     kind delete cluster --name "${KIND_CLUSTER_NAME}" 2>/dev/null || true
-    echo "=== Cleaning up mock GPU host artifacts ==="
-    bash "${SCRIPT_DIR}/cleanup-mock-gpu.sh" || true
   else
     echo "Skipping cleanup (SKIP_CLEANUP=true)"
   fi
@@ -95,8 +97,13 @@ trap cleanup EXIT
 collect_artifacts() {
   local debug_file="${ARTIFACTS}/cluster-debug.txt"
   {
-    echo "=== mock nvidia-smi (host) ==="
-    "${DRIVER_ROOT}/usr/bin/nvidia-smi" 2>&1 || echo "(nvidia-smi not available)"
+    if docker inspect "${KIND_NODE_CONTAINER}" > /dev/null 2>&1; then
+      echo "=== mock nvidia-smi (Kind node) ==="
+      docker exec "${KIND_NODE_CONTAINER}" \
+        "${DRIVER_ROOT}/usr/bin/nvidia-smi" 2>&1 || echo "(nvidia-smi not available)"
+    else
+      echo "=== mock nvidia-smi (Kind node unavailable) ==="
+    fi
 
     if kubectl cluster-info > /dev/null 2>&1; then
       echo "=== nodes ==="
@@ -162,27 +169,23 @@ if ! command -v kubectl > /dev/null 2>&1; then
       exit 1
       ;;
   esac
+  KUBECTL_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
   KUBECTL_VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)"
-  curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl"
+  curl -fsSLo /tmp/kubectl \
+    "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${KUBECTL_OS}/${KUBECTL_ARCH}/kubectl"
   sudo install /tmp/kubectl /usr/local/bin/kubectl
 fi
 
 echo "All prerequisites available"
 
-# --- Step 2: Set up mock NVML on host ---
+# --- Step 2: Validate mock NVML source ---
 echo ""
-echo "--- Step 2: Setting up mock NVML on host ---"
-GPU_PROFILE="${GPU_PROFILE}" \
-GPU_COUNT="${GPU_COUNT}" \
-K8S_TEST_INFRA_DIR="${K8S_TEST_INFRA_DIR}" \
-DRIVER_VERSION="${DRIVER_VERSION}" \
-  bash "${SCRIPT_DIR}/setup-mock-gpu.sh"
-
-# Quick sanity check
-echo ""
-echo "--- Verifying mock GPU setup ---"
-${DRIVER_ROOT}/usr/bin/nvidia-smi -L
-echo "Host nvidia-smi OK"
+echo "--- Step 2: Validating mock NVML source ---"
+if [ ! -d "${K8S_TEST_INFRA_DIR}/pkg/gpu/mocknvml" ]; then
+  echo "ERROR: k8s-test-infra not found at ${K8S_TEST_INFRA_DIR}" >&2
+  exit 1
+fi
+echo "Mock NVML source: ${K8S_TEST_INFRA_DIR}"
 
 # --- Step 3: Detect k8s version for feature gates ---
 echo ""
@@ -213,32 +216,28 @@ echo "--- Step 4: Creating Kind cluster ---"
 # Delete existing cluster if present
 kind delete cluster --name "${KIND_CLUSTER_NAME}" 2>/dev/null || true
 
-# Build Kind config with mock NVML host paths mounted into nodes.
-# The Kind node needs access to:
-#   /var/lib/nvml-mock  -- mock driver root, device nodes, config
-#   /var/run/cdi        -- CDI spec for container runtime
-#   /run/nvidia         -- GPU Operator compat symlink
 KIND_CONFIG=$(mktemp)
-cat > "${KIND_CONFIG}" << 'KINDEOF'
+{
+  cat << 'KINDEOF'
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 featureGates:
   DynamicResourceAllocation: true
+KINDEOF
+  if [ -n "${FEATURE_GATES}" ]; then
+    cat << 'KINDEOF'
+  DRAExtendedResource: true
+  DRAPartitionableDevices: true
+KINDEOF
+  fi
+  if [ "${TEST_DRA_LIST_TYPE_ATTRIBUTES}" = "true" ]; then
+    cat << 'KINDEOF'
+  DRAListTypeAttributes: true
+KINDEOF
+  fi
+  cat << 'KINDEOF'
 nodes:
   - role: control-plane
-    extraMounts:
-      # Mount mock driver root so kubelet-plugin can discover GPUs
-      - hostPath: /var/lib/nvml-mock
-        containerPath: /var/lib/nvml-mock
-        readOnly: false
-      # Mount CDI spec so containerd can inject mock devices
-      - hostPath: /var/run/cdi
-        containerPath: /var/run/cdi
-        readOnly: false
-      # GPU Operator compat symlink target
-      - hostPath: /run/nvidia
-        containerPath: /run/nvidia
-        readOnly: false
     kubeadmConfigPatches:
       - |
         kind: InitConfiguration
@@ -253,15 +252,7 @@ containerdConfigPatches:
     [plugins."io.containerd.grpc.v1.cri"]
       enable_cdi = true
 KINDEOF
-
-# Inject additional feature gates for k8s 1.35+
-if [ -n "${FEATURE_GATES}" ]; then
-  # Add DRA-specific feature gates to the Kind config
-  sed -i '/DynamicResourceAllocation: true/a\  DRAExtendedResource: true\n  DRAPartitionableDevices: true' "${KIND_CONFIG}"
-fi
-if [ "${TEST_DRA_LIST_TYPE_ATTRIBUTES}" = "true" ]; then
-  sed -i '/DynamicResourceAllocation: true/a\  DRAListTypeAttributes: true' "${KIND_CONFIG}"
-fi
+} > "${KIND_CONFIG}"
 
 # Select Kind node image if k8s version specified
 KIND_IMAGE_ARG=""
@@ -280,47 +271,16 @@ rm -f "${KIND_CONFIG}"
 kubectl wait --for=condition=Ready nodes --all --timeout=120s
 echo "Kind cluster ready"
 
-# Verify CDI is visible inside Kind node
-echo "Verifying CDI spec visible in Kind node..."
-docker exec "${KIND_CLUSTER_NAME}-control-plane" ls /var/run/cdi/nvidia-mock.yaml
-docker exec "${KIND_CLUSTER_NAME}-control-plane" ls /var/lib/nvml-mock/driver/usr/lib64/libnvidia-ml.so.1
-
-# Create /dev/nvidia* symlinks in the Kind node so tests that scan the host's
-# /dev directory (test_gpu_robustness "ResourceSlice device count matches host
-# GPU count") can find the mock device nodes.
-for i in $(seq 0 $((GPU_COUNT - 1))); do
-  docker exec "${KIND_CLUSTER_NAME}-control-plane" \
-    ln -sf "/var/lib/nvml-mock/dev/nvidia${i}" "/dev/nvidia${i}"
-done
-
-# Create mock IMEX channel device nodes directly inside the Kind node.
-# Kind extraMounts into /dev/ don't work (Docker manages /dev via devtmpfs),
-# so we mknod them directly. The compute-domain CDI spec references
-# /dev/nvidia-caps-imex-channels/channelN as both container and host path.
-IMEX_MAJOR=235
-docker exec "${KIND_CLUSTER_NAME}-control-plane" mkdir -p /dev/nvidia-caps-imex-channels
-echo "Creating 2048 IMEX channel device nodes inside Kind node..."
-docker exec "${KIND_CLUSTER_NAME}-control-plane" sh -c "
-  for i in \$(seq 0 2047); do
-    mknod -m 666 /dev/nvidia-caps-imex-channels/channel\${i} c ${IMEX_MAJOR} \${i} 2>/dev/null || true
-  done
-"
-echo "IMEX channel device nodes created in Kind node"
-
-# Bind-mount fake /proc/devices into the Kind node so the compute-domain
-# kubelet-plugin can find nvidia-caps-imex-channels. This requires nsenter
-# because plain `docker exec mount --bind` cannot bind-mount over /proc
-# entries from within the container.
-MOCK_PROC_DEVICES="${MOCK_ROOT}/imex/proc-devices"
-if [ -f "${MOCK_PROC_DEVICES}" ]; then
-  KIND_PID=$(docker inspect -f '{{.State.Pid}}' "${KIND_CLUSTER_NAME}-control-plane")
-  sudo cp "${MOCK_PROC_DEVICES}" "/proc/${KIND_PID}/root/tmp/mock-proc-devices"
-  if sudo nsenter -t "${KIND_PID}" -m -p -- mount --bind /tmp/mock-proc-devices /proc/devices 2>/dev/null; then
-    echo "Mock /proc/devices installed in Kind node"
-  else
-    echo "WARNING: Could not bind-mount mock /proc/devices (compute-domains will be disabled)"
-  fi
-fi
+echo ""
+echo "--- Installing mock NVML directly in Kind node ---"
+KIND_NODE_CONTAINER="${KIND_NODE_CONTAINER}" \
+GPU_PROFILE="${GPU_PROFILE}" \
+GPU_COUNT="${GPU_COUNT}" \
+K8S_TEST_INFRA_DIR="${K8S_TEST_INFRA_DIR}" \
+DRIVER_VERSION="${DRIVER_VERSION}" \
+MOCK_ROOT="${MOCK_ROOT}" \
+DRIVER_ROOT="${DRIVER_ROOT}" \
+  bash "${SCRIPT_DIR}/setup-mock-gpu-in-kind.sh"
 
 # --- Step 5: Build DRA driver image and load into Kind ---
 echo ""
@@ -366,13 +326,10 @@ echo ""
 echo "--- Step 7: Running BATS tests ---"
 cd "${REPO_ROOT}"
 
-# Build the BATS runner image.
-# GHA CI uses flock to serialize image builds (see tests/bats/Makefile).
-mkdir -p /tmp/gh-runner-locks 2>/dev/null || true
-docker buildx use default 2>/dev/null || true
-make -f tests/bats/Makefile runner-image GIT_COMMIT_SHORT="${GIT_COMMIT_SHORT}"
+# The test target builds the BATS runner image and uses this directory for its
+# GHA build lock.
+mkdir -p /tmp/gh-runner-locks
 
-export KUBECONFIG="${HOME}/.kube/config"
 export CI=true
 export TEST_NVIDIA_DRIVER_ROOT="${DRIVER_ROOT}"
 export TEST_CHART_LOCAL=true
@@ -380,14 +337,16 @@ export DISABLE_COMPUTE_DOMAINS=false
 export TEST_FILTER_TAGS="${FILTER}"
 export NVMM_PATH=/cwd/tests/bats/lib/lambda
 export TEST_ALT_PROC_DEVICES="${MOCK_ROOT}/imex/proc-devices"
-# Kind kubeconfig uses 127.0.0.1; the BATS Docker container needs host networking.
-export DOCKER_NETWORK=host
 
-# Run mock-compatible test files only. We skip test_gpu_cuda_workloads.bats
-# because it includes a CUDA demo suite test that requires real GPU compute
-# and has a 15-minute timeout. We also skip test_gpu_dynmig.bats (MIG).
-# TMPDIR=/tmp overrides the Makefile's CI default (CURDIR) so the BATS run
-# directory lands under /tmp which is mounted into the Docker container.
+# The external Kind kubeconfig points at 127.0.0.1 on the host. Use Kind's
+# internal kubeconfig and Docker network so the BATS container can reach the
+# API server on Linux and Docker Desktop without host-networking support.
+BATS_KUBECONFIG="${ARTIFACTS}/kind-internal-kubeconfig"
+kind get kubeconfig --internal --name "${KIND_CLUSTER_NAME}" > "${BATS_KUBECONFIG}"
+
+# Keep retained BATS temp directories under the host-mounted /tmp.
+KUBECONFIG="${BATS_KUBECONFIG}" \
+DOCKER_NETWORK=kind \
 SKIP_CLEANUP=true \
   make -f tests/bats/Makefile tests-mock-nvml \
     GIT_COMMIT_SHORT="${GIT_COMMIT_SHORT}" \
