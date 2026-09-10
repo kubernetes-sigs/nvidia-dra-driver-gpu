@@ -1,0 +1,34 @@
+# Scenario: single pod requesting any full GPU, without tolerating device
+# taints. Used to show that a NoSchedule health taint blocks scheduling.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: rct-single-gpu-full
+  labels:
+    env: batssuite
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-full-gpu-untolerated
+  labels:
+    env: batssuite
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: rct-single-gpu-full

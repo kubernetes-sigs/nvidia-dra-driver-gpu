@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	resourceapi "k8s.io/api/resource/v1"
@@ -64,16 +65,43 @@ type DeviceHealthEvent struct {
 	EventData uint64
 }
 
+// logIfUnknownType reports an event type the driver does not know, once per
+// received event; such events are treated as unmonitored by both consumers.
+func (e *DeviceHealthEvent) logIfUnknownType() {
+	switch e.EventType {
+	case HealthEventXID, HealthEventGPULost, HealthEventUnmonitored:
+	default:
+		klog.Errorf("Unknown health event type %q, treating as unmonitored", e.EventType)
+	}
+}
+
+// IsCritical reports whether the event is a hardware failure that makes the
+// device unusable until fixed: a lost GPU, or an XID that the monitor does
+// not classify as non-fatal. It is the single decision behind both the
+// device taint derived from the event (healthEventToTaint, KEP-5055) and the
+// device health reported to the kubelet (deviceHealthFromTaints, KEP-4680), so
+// the two cannot drift apart.
+func (e *DeviceHealthEvent) IsCritical(monitor deviceHealthMonitor) bool {
+	switch e.EventType {
+	case HealthEventXID:
+		return monitor == nil || !monitor.IsEventNonFatal(e)
+	case HealthEventGPULost:
+		return true
+	default:
+		return false
+	}
+}
+
 // healthEventToTaint maps a DeviceHealthEvent to the corresponding DRA
 // DeviceTaint using the Option A taint key schema: one key per health
 // dimension under the gpu.nvidia.com domain.
 func healthEventToTaint(monitor deviceHealthMonitor, event *DeviceHealthEvent) *resourceapi.DeviceTaint {
+	effect := resourceapi.DeviceTaintEffectNone
+	if event.IsCritical(monitor) {
+		effect = resourceapi.DeviceTaintEffectNoSchedule
+	}
 	switch event.EventType {
 	case HealthEventXID:
-		effect := resourceapi.DeviceTaintEffectNoSchedule
-		if monitor != nil && monitor.IsEventNonFatal(event) {
-			effect = resourceapi.DeviceTaintEffectNone
-		}
 		return &resourceapi.DeviceTaint{
 			Key:    TaintKeyXID,
 			Value:  strconv.FormatUint(event.EventData, 10),
@@ -82,21 +110,31 @@ func healthEventToTaint(monitor deviceHealthMonitor, event *DeviceHealthEvent) *
 	case HealthEventGPULost:
 		return &resourceapi.DeviceTaint{
 			Key:    TaintKeyGPULost,
-			Effect: resourceapi.DeviceTaintEffectNoSchedule,
-		}
-	case HealthEventUnmonitored:
-		return &resourceapi.DeviceTaint{
-			Key:    TaintKeyUnmonitored,
-			Effect: resourceapi.DeviceTaintEffectNone,
+			Effect: effect,
 		}
 	default:
-		klog.Errorf("Unknown health event type %q, defaulting to unmonitored taint", event.EventType)
+		// HealthEventUnmonitored and unknown event types.
 		return &resourceapi.DeviceTaint{
 			Key:    TaintKeyUnmonitored,
-			Effect: resourceapi.DeviceTaintEffectNone,
+			Effect: effect,
 		}
 	}
 }
+
+// monitorHeartbeatInterval is how often the monitor's event loop signals that
+// it is alive. The kubelet reports device health as unknown when it is not
+// refreshed within each device's health check timeout (30 seconds by
+// default), so the driver re-sends its health report on every heartbeat. The
+// heartbeat deliberately originates from the event loop itself, after each
+// NVML event wait returns: if the loop or the NVML call wedges, the resends
+// stop and the kubelet correctly decays the devices' health to unknown
+// instead of trusting a stale report.
+const monitorHeartbeatInterval = 15 * time.Second
+
+// eventWaitRetryDelay is how long the event loop pauses after an NVML event
+// wait fails with an error other than ERROR_TIMEOUT, which return immediately
+// instead of after the wait timeout. A variable so tests can shorten it.
+var eventWaitRetryDelay = time.Second
 
 type nvmlDeviceHealthMonitor struct {
 	nvmllib           nvml.Interface
@@ -104,6 +142,8 @@ type nvmlDeviceHealthMonitor struct {
 	unhealthy         chan *DeviceHealthEvent
 	perGPUAllocatable *PerGPUAllocatableDevices
 	gpuInfosByUUID    map[string]*GpuInfo
+	heartbeat         chan struct{}
+	lastHeartbeat     time.Time
 	skippedXids       map[uint64]bool
 	wg                sync.WaitGroup
 }
@@ -128,6 +168,7 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 		unhealthy:         make(chan *DeviceHealthEvent, len(all)),
 		perGPUAllocatable: perGPUAllocatable,
 		gpuInfosByUUID:    nvdevlib.gpuInfosByUUID,
+		heartbeat:         make(chan struct{}, 1),
 		skippedXids:       xidsToSkip(config.flags.additionalXidsToIgnore),
 	}
 	return m, nil
@@ -211,17 +252,24 @@ func (m *nvmlDeviceHealthMonitor) Stop() {
 
 	m.wg.Wait()
 
-	if ret := m.eventSet.Free(); ret != nvml.SUCCESS {
-		klog.Warningf("failed to unset events: %v", ret)
-	}
-
-	if ret := m.nvmllib.Shutdown(); ret != nvml.SUCCESS {
-		klog.Warningf("failed to shutdown NVML: %v", ret)
+	// The event set and the NVML session it belongs to exist only after a
+	// successful RegisterEvents; a failed registration cleans up after
+	// itself, so Stop must not touch NVML in that case.
+	if m.eventSet != nil {
+		if ret := m.eventSet.Free(); ret != nvml.SUCCESS {
+			klog.Warningf("failed to unset events: %v", ret)
+		}
+		if ret := m.nvmllib.Shutdown(); ret != nvml.SUCCESS {
+			klog.Warningf("failed to shutdown NVML: %v", ret)
+		}
 	}
 	close(m.unhealthy)
 }
 
 func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
+	// lastRet is the previous event wait return, to log a persistent error
+	// once instead of on every retry.
+	lastRet := nvml.SUCCESS
 	for {
 		select {
 		case <-ctx.Done():
@@ -229,20 +277,57 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 			return
 		default:
 			event, ret := m.eventSet.Wait(5000) // timeout in 5000 ms.
+
+			// The heartbeat proves the NVML event stream is responsive, so
+			// it fires only for returns that show NVML answered about the
+			// devices: a successful wait, ERROR_TIMEOUT after the 5s deadline
+			// (the normal idle path, which drives the heartbeat on a quiet,
+			// healthy GPU), and ERROR_GPU_IS_LOST, where NVML is responsive
+			// and reports a known failure that is tainted below, so the
+			// kubelet keeps seeing the devices as unhealthy rather than
+			// unknown. A wedged NVML call returns nothing at all and any
+			// other error (for example ERROR_UNINITIALIZED or ERROR_UNKNOWN)
+			// means no events can be received: in both cases the heartbeat
+			// stops and the kubelet then reports the devices' health as
+			// unknown instead of trusting stale data.
+			if ret == nvml.SUCCESS || ret == nvml.ERROR_TIMEOUT || ret == nvml.ERROR_GPU_IS_LOST {
+				m.beat()
+			}
+
 			if ret == nvml.ERROR_TIMEOUT {
+				lastRet = ret
 				continue
 			}
-			// not all return errors are handled as currently there is no proper way to process these errors other than marking all devices healthy.
+			// Only ERROR_GPU_IS_LOST maps to a taint. Other errors are not
+			// mapped to any health state: the loop backs off and retries,
+			// and since no heartbeat is emitted for them (above) the health
+			// reported to the kubelet decays to unknown while they persist.
 			// Ref doc: [https://docs.nvidia.com/deploy/nvml-api/group__nvmlEvents.html#group__nvmlEvents_1g9714b0ca9a34c7a7780f87fee16b205c].
 			if ret != nvml.SUCCESS {
 				if ret == nvml.ERROR_GPU_IS_LOST {
-					klog.Warningf("GPU is lost error: %v; Tainting all devices with %s", ret, TaintKeyGPULost)
+					// A lost GPU is re-reported on every retry; warn once
+					// per episode, the taint update is idempotent.
+					if lastRet != ret {
+						klog.Warningf("GPU is lost error: %v; Tainting all devices with %s", ret, TaintKeyGPULost)
+					} else {
+						klog.V(6).Infof("GPU is still lost: %v", ret)
+					}
 					m.sendHealthEventForAllDevices(HealthEventGPULost)
-					continue
+				} else {
+					klog.V(6).Infof("Error waiting for NVML event: %v. Retrying...", ret)
 				}
-				klog.V(6).Infof("Error waiting for NVML event: %v. Retrying...", ret)
+				lastRet = ret
+				// A persistent error (including a GPU that stays lost)
+				// returns immediately instead of after the wait timeout;
+				// pause before retrying so the loop does not spin.
+				select {
+				case <-ctx.Done():
+				case <-time.After(eventWaitRetryDelay):
+				}
 				continue
 			}
+
+			lastRet = ret
 
 			// TODO: check why other supported types are not considered?
 			eType := event.EventType
@@ -264,23 +349,33 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				m.sendHealthEventForAllDevices(HealthEventGPULost)
 				continue
 			}
-			affectedDevice, err := m.resolveDeviceByEventAddress(eventUUID, event.Device, gi, ci)
-			// An error indicates inconsistent UUID/PCI inventory. A nil device
+			affectedDevices, err := m.resolveDevicesByEventAddress(eventUUID, event.Device, gi, ci)
+			// An error indicates inconsistent UUID/PCI inventory. No devices
 			// without an error means the event's GI/CI is not available.
 			if err != nil {
 				klog.Warningf("Unable to resolve XID=%d event for UUID:%s, GI:%d, CI:%d: %v", xid, eventUUID, gi, ci, err)
 				continue
 			}
-			if affectedDevice == nil {
+			if len(affectedDevices) == 0 {
 				klog.V(6).Infof("Ignoring event for unexpected device (UUID:%s, GI:%d, CI:%d)", eventUUID, gi, ci)
 				continue
 			}
 
-			klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.CanonicalName())
-			m.unhealthy <- &DeviceHealthEvent{
-				Devices:   []*AllocatableDevice{affectedDevice},
+			for _, affectedDevice := range affectedDevices {
+				klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.CanonicalName())
+			}
+			// The send observes ctx so that a full channel (for example an
+			// XID storm before the consumer goroutine starts) cannot park
+			// this goroutine past shutdown and deadlock Stop().
+			select {
+			case m.unhealthy <- &DeviceHealthEvent{
+				Devices:   affectedDevices,
 				EventType: HealthEventXID,
 				EventData: xid,
+			}:
+			case <-ctx.Done():
+				klog.V(6).Info("Stopping event-driven GPU health monitor...")
+				return
 			}
 		}
 	}
@@ -288,6 +383,30 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 
 func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *DeviceHealthEvent {
 	return m.unhealthy
+}
+
+// beat signals that the NVML event wait returned, at most once per
+// monitorHeartbeatInterval. The interval clock only advances when the signal
+// is actually delivered: a dropped beat must not consume the interval, or a
+// slow consumer would stretch the gap between delivered heartbeats and erode
+// the margin to the kubelet's health check timeout. Only called from the run
+// goroutine.
+func (m *nvmlDeviceHealthMonitor) beat() {
+	if time.Since(m.lastHeartbeat) < monitorHeartbeatInterval {
+		return
+	}
+	select {
+	case m.heartbeat <- struct{}{}:
+		m.lastHeartbeat = time.Now()
+	default:
+	}
+}
+
+// Heartbeat signals that the monitor's event loop is alive. The driver
+// re-sends its current health report on each heartbeat to keep the kubelet's
+// health data fresh.
+func (m *nvmlDeviceHealthMonitor) Heartbeat() <-chan struct{} {
+	return m.heartbeat
 }
 
 // sendHealthEventForAllDevices aggregates every device across all GPUs into a
@@ -307,9 +426,13 @@ func (m *nvmlDeviceHealthMonitor) sendHealthEventForDevices(devices AllocatableD
 // ID, compute instance ID). A full-GPU event reports FullGPUInstanceID for both
 // the GPU instance ID and compute instance ID.
 //
-// resolveDeviceByEventAddress maps this address, extracted from an NVML event,
-// to an advertised allocatable device.
-func (m *nvmlDeviceHealthMonitor) resolveDeviceByEventAddress(parentUUID string, eventDevice nvml.Device, gi, ci uint32) (*AllocatableDevice, error) {
+// resolveDevicesByEventAddress maps this address, extracted from an NVML
+// event, to the advertised allocatable devices it affects: a MIG-scoped event
+// affects that one MIG device; a full-GPU event (for example XID 79, the GPU
+// fell off the bus) affects the GPU and every MIG device on it, whether the
+// full GPU itself is allocatable or not (static MIG mode, Dynamic MIG on
+// Ampere), as in the device plugin's health checker.
+func (m *nvmlDeviceHealthMonitor) resolveDevicesByEventAddress(parentUUID string, eventDevice nvml.Device, gi, ci uint32) ([]*AllocatableDevice, error) {
 	parent, ok := m.gpuInfosByUUID[parentUUID]
 	if !ok {
 		return nil, fmt.Errorf("failed to find parent GPU UUID %s in the discovered GPU inventory", parentUUID)
@@ -322,22 +445,27 @@ func (m *nvmlDeviceHealthMonitor) resolveDeviceByEventAddress(parentUUID string,
 
 	switch {
 	case gi == FullGPUInstanceID && ci == FullGPUInstanceID:
-		return devices.GetGPUDeviceByUUID(parentUUID), nil
+		return devices.List(), nil
 
 	case gi != FullGPUInstanceID && ci != FullGPUInstanceID:
+		var device *AllocatableDevice
 		if featuregates.Enabled(featuregates.DynamicMIG) {
 			spec, err := resolveMigEvent(eventDevice, parent, gi, ci)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve Dynamic MIG device for parent %s, GI=%d, CI=%d: %w", parentUUID, gi, ci, err)
 			}
-			return devices.GetMigDynamicDeviceByTuple(spec), nil
+			device = devices.GetMigDynamicDeviceByTuple(spec)
+		} else {
+			device = devices.GetMigStaticDeviceByLiveTuple(&MigLiveTuple{
+				ParentUUID: parentUUID,
+				GIID:       int(gi),
+				CIID:       int(ci),
+			})
 		}
-
-		return devices.GetMigStaticDeviceByLiveTuple(&MigLiveTuple{
-			ParentUUID: parentUUID,
-			GIID:       int(gi),
-			CIID:       int(ci),
-		}), nil
+		if device == nil {
+			return nil, nil
+		}
+		return []*AllocatableDevice{device}, nil
 
 	default:
 		// A GI can exist without a CI, but it does not represent a usable,

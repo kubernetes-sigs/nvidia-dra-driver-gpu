@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: NVIDIA/k8s-test-infra
-          ref: 1275802ba689f3e40be78d15859123c21d3271c4
+          ref: 64bae6b2b53cdd8d6dd0dd11dfacaf46e786a718 # includes NVIDIA/k8s-test-infra#735 (Xid event fidelity) and #746 (ERROR_GPU_IS_LOST from event wait)
           path: _k8s-test-infra
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:

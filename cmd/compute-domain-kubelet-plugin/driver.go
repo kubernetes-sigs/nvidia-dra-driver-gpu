@@ -178,6 +178,13 @@ func (d *driver) Shutdown() error {
 	return nil
 }
 
+// WatchHealthStatus implements [kubeletplugin.DRAPlugin]. The ComputeDomain
+// plugin does not report device health (see also the HealthService option in
+// NewDriver, which keeps the DRAResourceHealth service from being advertised).
+func (d *driver) WatchHealthStatus(ctx context.Context, reports chan<- kubeletplugin.DeviceHealthReport) error {
+	return kubeletplugin.ErrHealthNotSupported
+}
+
 func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
 	klog.V(6).Infof("PrepareResourceClaims called with %d claim(s)", len(claims))
 
@@ -251,10 +258,6 @@ func (d *driver) HandleError(ctx context.Context, err error, msg string) {
 	// For now we just follow the advice documented in the DRAPlugin API docs.
 	// See: https://pkg.go.dev/k8s.io/apimachinery/pkg/util/runtime#HandleErrorWithContext
 	runtime.HandleErrorWithContext(ctx, err, msg)
-}
-
-func (d *driver) WatchHealthStatus(context.Context, chan<- kubeletplugin.DeviceHealthReport) error {
-	return kubeletplugin.ErrHealthNotSupported
 }
 
 // nodePrepareResource() returns a 2-tuple; the first value is a boolean

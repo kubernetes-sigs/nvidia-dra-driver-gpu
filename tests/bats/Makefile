@@ -195,6 +195,7 @@ tests-mock-nvml: runner-image
 		tests/bats/test_gpu_extres.bats \
 		tests/bats/test_gpu_stress.bats \
 		tests/bats/test_gpu_updowngrade.bats \
+		tests/bats/test_gpu_health.bats \
 		tests/bats/test_cd_imex_chan_inject.bats \
 		tests/bats/test_cd_misc.bats \
 		tests/bats/test_cd_logging.bats \
@@ -202,6 +203,11 @@ tests-mock-nvml: runner-image
 		tests/bats/test_cd_mnnvl_workload.bats \
 		tests/bats/test_cd_updowngrade.bats \
 		tests/bats/test_cd_leader_election.bats)
+
+# Run an explicit list of test files, e.g.
+#   make -f tests/bats/Makefile tests-files BATS_FILES="tests/bats/test_gpu_health.bats"
+tests-files: runner-image
+	$(call RUN_BATS, $(BATS_FILES))
 
 tests-gpu-single: runner-image
 	$(call RUN_BATS, \
@@ -236,6 +242,7 @@ tests-gpu: runner-image
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_mig.bats \
 		tests/bats/test_gpu_updowngrade.bats \
+		tests/bats/test_gpu_health.bats \
 		tests/bats/test_gpu_stress.bats)
 
 # Run a subset covering mainly the CD plugin
@@ -260,6 +267,7 @@ tests: runner-image
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_mig.bats \
 		tests/bats/test_gpu_updowngrade.bats \
+		tests/bats/test_gpu_health.bats \
 		tests/bats/test_cd_imex_chan_inject.bats \
 		tests/bats/test_cd_mnnvl_workload.bats \
 		tests/bats/test_cd_misc.bats \

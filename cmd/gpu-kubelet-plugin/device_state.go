@@ -1997,9 +1997,23 @@ func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {
 	return false
 }
 
+// dynamicMIGParentDevice returns the allocatable full-GPU device of a Dynamic
+// MIG device, or nil when the full GPU is not allocatable.
+func (s *DeviceState) dynamicMIGParentDevice(device *AllocatableDevice) *AllocatableDevice {
+	if device.MigDynamic == nil || device.MigDynamic.Parent == nil {
+		return nil
+	}
+	return s.perGPUAllocatable.GetGPUDeviceByPCIBusID(device.MigDynamic.Parent.pciBusID)
+}
+
 // clearDynamicMIGXIDTaint clears health state that belongs to a concrete
 // Dynamic MIG incarnation after that device no longer exists. Parent-scoped
-// taints, such as GPU lost or an unavailable health monitor, remain intact.
+// taints, such as GPU lost or an unavailable health monitor, remain intact,
+// and so does an XID taint that the parent GPU still carries as critical: a
+// GPU-scoped XID is fanned out to every MIG device on the GPU, and destroying
+// one MIG instance does not fix the GPU. (On GPUs whose full-GPU device is
+// not allocatable, such as Ampere in MIG mode, the parent's taints are not
+// tracked and the XID taint is cleared.)
 //
 // NOTE: An XID event already queued before deletion could re-add the taint.
 // This cleanup intentionally does not track concrete MIG
@@ -2008,6 +2022,15 @@ func (s *DeviceState) clearDynamicMIGXIDTaint(name DeviceName) bool {
 	device := s.perGPUAllocatable.GetAllocatableDevice(name)
 	if device == nil || device.Type() != MigDynamicDeviceType {
 		return false
+	}
+	if parent := s.dynamicMIGParentDevice(device); parent != nil {
+		for _, taint := range parent.Taints() {
+			if taint.Key == TaintKeyXID && taint.Effect != resourceapi.DeviceTaintEffectNone {
+				klog.V(4).Infof("Keeping health taint on destroyed Dynamic MIG device %s: parent GPU %s still has critical XID %s",
+					name, parent.CanonicalName(), taint.Value)
+				return false
+			}
+		}
 	}
 	if taint, removed := device.RemoveTaint(TaintKeyXID); removed {
 		klog.V(4).Infof("Cleared health taint for destroyed Dynamic MIG device %s: key=%q, value=%q, effect=%s",

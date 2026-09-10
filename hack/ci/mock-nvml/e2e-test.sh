@@ -262,6 +262,12 @@ fi
 if [ "${TEST_DRA_LIST_TYPE_ATTRIBUTES}" = "true" ]; then
   sed -i '/DynamicResourceAllocation: true/a\  DRAListTypeAttributes: true' "${KIND_CONFIG}"
 fi
+# KEP-4680 device health in pod status (tests/bats/test_gpu_health.bats):
+# beta and on by default from k8s 1.36, alpha (off) before.
+if [ "${K8S_MINOR}" -lt 36 ]; then
+  echo "K8s < 1.36 (${RESOLVED_K8S_VERSION}): enabling ResourceHealthStatus"
+  sed -i '/DynamicResourceAllocation: true/a\  ResourceHealthStatus: true' "${KIND_CONFIG}"
+fi
 
 # Select Kind node image if k8s version specified
 KIND_IMAGE_ARG=""
