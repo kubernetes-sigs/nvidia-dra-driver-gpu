@@ -218,6 +218,14 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
 	}
 
+	// Decode and validate before checkpointing, so that a claim rejected on its
+	// own contents never leaves an entry behind. Unprepare would have to decode
+	// that entry to clean it up, which is exactly what failed here.
+	plan, err := s.buildPreparePlan(claim)
+	if err != nil {
+		return nil, fmt.Errorf("prepare preflight failed: %w", err)
+	}
+
 	err = s.updateCheckpoint(func(checkpoint *Checkpoint) {
 		checkpoint.V2.PreparedClaims[claimUID] = PreparedClaim{
 			CheckpointState: ClaimCheckpointStatePrepareStarted,
@@ -231,7 +239,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 
-	preparedDevices, err := s.prepareDevices(ctx, claim)
+	preparedDevices, err := s.applyPreparePlan(ctx, claim, plan)
 	if err != nil {
 		return nil, fmt.Errorf("prepare devices failed: %w", err)
 	}
@@ -488,21 +496,12 @@ func expiredPrepareAbortedClaimEntries(cp *Checkpoint, now time.Time, ttl time.D
 	return expired
 }
 
-func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
-	// Generate a mapping of each OpaqueDeviceConfigs to the Device.Results it
-	// applies to. Strict-decode: data is provided by user and may be completely
-	// unvalidated so far (in absence of validating webhook).
-	configResultsMap, err := s.getConfigResultsMap(&claim.Status, configapi.StrictDecoder)
-	if err != nil {
-		return nil, fmt.Errorf("error generating configResultsMap: %w", err)
-	}
-
-	// Normalize, validate, and apply all configs associated with devices that
-	// need to be prepared. Track device group configs generated from applying the
-	// config to the set of device allocation results.
-	preparedDeviceGroupConfigState := make(map[runtime.Object]*DeviceConfigState)
-	for c, results := range configResultsMap {
-		// Cast the opaque config to a configapi.Interface type
+// validateConfigs normalizes and validates every config on the claim and returns
+// them keyed as configResultsMap keys them. prepareDevices applies nothing until
+// this returns, so one bad config cannot land after a good one has taken effect.
+func validateConfigs(configResultsMap map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult) (map[runtime.Object]configapi.Interface, error) {
+	validated := make(map[runtime.Object]configapi.Interface, len(configResultsMap))
+	for c := range configResultsMap {
 		var config configapi.Interface
 		switch castConfig := c.(type) {
 		case *configapi.ComputeDomainChannelConfig:
@@ -510,26 +509,57 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		case *configapi.ComputeDomainDaemonConfig:
 			config = castConfig
 		default:
-			return nil, fmt.Errorf("runtime object is not a recognized configuration")
+			return nil, permanentError{fmt.Errorf("runtime object is not a recognized configuration")}
 		}
 
-		// Normalize the config to set any implied defaults.
+		// These failures are deterministic, so spending the prepare deadline on
+		// retries cannot help.
 		if err := config.Normalize(); err != nil {
-			return nil, fmt.Errorf("error normalizing config: %w", err)
+			return nil, permanentError{fmt.Errorf("error normalizing config: %w", err)}
 		}
-
-		// Validate the config to ensure its integrity.
 		if err := config.Validate(); err != nil {
-			return nil, fmt.Errorf("error validating config: %w", err)
+			return nil, permanentError{fmt.Errorf("error validating config: %w", err)}
 		}
 
-		// Apply the config to the list of results associated with it.
-		configState, err := s.applyConfig(ctx, config, claim, results)
+		validated[c] = config
+	}
+	return validated, nil
+}
+
+// preparePlan is everything Prepare can work out about a claim without touching
+// anything outside this process.
+type preparePlan struct {
+	configResultsMap map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult
+	validatedConfigs map[runtime.Object]configapi.Interface
+}
+
+// buildPreparePlan decodes and validates the claim's configs. It writes nothing
+// and touches no device, so a claim it rejects leaves no trace for Unprepare to
+// have to undo. Decoding is strict because the config is claim-authored and may
+// not have passed a validating webhook.
+func (s *DeviceState) buildPreparePlan(claim *resourceapi.ResourceClaim) (*preparePlan, error) {
+	configResultsMap, err := s.getConfigResultsMap(&claim.Status, configapi.StrictDecoder)
+	if err != nil {
+		return nil, permanentError{fmt.Errorf("error generating configResultsMap: %w", err)}
+	}
+
+	validatedConfigs, err := validateConfigs(configResultsMap)
+	if err != nil {
+		return nil, err
+	}
+
+	return &preparePlan{configResultsMap: configResultsMap, validatedConfigs: validatedConfigs}, nil
+}
+
+func (s *DeviceState) applyPreparePlan(ctx context.Context, claim *resourceapi.ResourceClaim, plan *preparePlan) (PreparedDevices, error) {
+	configResultsMap, validatedConfigs := plan.configResultsMap, plan.validatedConfigs
+
+	preparedDeviceGroupConfigState := make(map[runtime.Object]*DeviceConfigState)
+	for c, results := range configResultsMap {
+		configState, err := s.applyConfig(ctx, validatedConfigs[c], claim, results)
 		if err != nil {
 			return nil, fmt.Errorf("error applying config: %w", err)
 		}
-
-		// Capture the prepared device group config in the map.
 		preparedDeviceGroupConfigState[c] = configState
 	}
 
@@ -603,10 +633,13 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.Reso
 				return fmt.Errorf("error removing Node label for ComputeDomain: %w", err)
 			}
 		case *configapi.ComputeDomainDaemonConfig:
-			// If a daemon type, unprepare the new ComputeDomain daemon.
+			// An old checkpoint can hold a DomainID this now rejects. Failing here
+			// would strand the claim, and cleaning up would mean deleting whatever
+			// the unvalidated path resolves to, so skip it.
 			computeDomainDaemonSettings, err := s.computeDomainManager.NewSettings(config.DomainID)
 			if err != nil {
-				return fmt.Errorf("error creating ComputeDomain daemon settings: %w", err)
+				klog.Warningf("skipping ComputeDomain daemon unprepare: %v", err)
+				continue
 			}
 			if err := computeDomainDaemonSettings.Unprepare(ctx); err != nil {
 				return fmt.Errorf("error unpreparing ComputeDomain daemon settings: %w", err)
