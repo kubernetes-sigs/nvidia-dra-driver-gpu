@@ -444,6 +444,111 @@ func TestHealthMonitorStartRequiresRegisteredEvents(t *testing.T) {
 	require.ErrorContains(t, m.Start(context.Background()), "events have not been registered")
 }
 
+func TestGetAdditionalXids(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []uint64
+	}{
+		{name: "empty", input: "", want: nil},
+		{name: "single", input: "79", want: []uint64{79}},
+		{name: "multiple", input: "79,94,95", want: []uint64{79, 94, 95}},
+		{name: "whitespace trimmed", input: " 79 , 94 ", want: []uint64{79, 94}},
+		{name: "malformed ignored", input: "79,foo,94", want: []uint64{79, 94}},
+		{name: "empty entries ignored", input: "79,,94,", want: []uint64{79, 94}},
+		{name: "all malformed", input: "foo,bar", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, getAdditionalXids(tc.input))
+		})
+	}
+}
+
+func TestXidsToSkip(t *testing.T) {
+	hardcoded := []uint64{13, 31, 43, 45, 68, 109}
+
+	t.Run("hardcoded XIDs always skipped", func(t *testing.T) {
+		skip := xidsToSkip("")
+		for _, xid := range hardcoded {
+			assert.Truef(t, skip[xid], "expected hardcoded XID %d to be skipped", xid)
+		}
+		assert.False(t, skip[48], "XID 48 is fatal and must not be skipped")
+	})
+
+	t.Run("additional XIDs merged with hardcoded", func(t *testing.T) {
+		skip := xidsToSkip("79,94")
+		for _, xid := range hardcoded {
+			assert.Truef(t, skip[xid], "expected hardcoded XID %d to be skipped", xid)
+		}
+		assert.True(t, skip[79])
+		assert.True(t, skip[94])
+	})
+}
+
+func TestSendBatchedHealthEvent(t *testing.T) {
+	devA := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-a"}}
+	devB := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-b"}}
+
+	t.Run("empty devices sends nothing", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.sendBatchedHealthEvent(nil, HealthEventGPULost)
+		assert.Len(t, m.unhealthy, 0)
+	})
+
+	t.Run("normal batched send", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.sendBatchedHealthEvent([]*AllocatableDevice{devA, devB}, HealthEventGPULost)
+		require.Len(t, m.unhealthy, 1)
+		event := <-m.unhealthy
+		assert.Equal(t, HealthEventGPULost, event.EventType)
+		assert.Len(t, event.Devices, 2)
+	})
+
+	t.Run("full channel drops without blocking", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.unhealthy <- &DeviceHealthEvent{} // fill the channel
+		// Must return instead of blocking; the second event is dropped.
+		m.sendBatchedHealthEvent([]*AllocatableDevice{devA}, HealthEventUnmonitored)
+		assert.Len(t, m.unhealthy, 1)
+	})
+}
+
+func TestSendHealthEventForAllDevices(t *testing.T) {
+	devA := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-a"}}
+	devB := &AllocatableDevice{MigStatic: &MigDeviceInfo{ParentUUID: "GPU-a"}}
+	m := &nvmlDeviceHealthMonitor{
+		unhealthy: make(chan *DeviceHealthEvent, 1),
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				"0000:01:00.0": {"gpu": devA, "mig": devB},
+			},
+		},
+	}
+
+	m.sendHealthEventForAllDevices(HealthEventGPULost)
+
+	require.Len(t, m.unhealthy, 1)
+	event := <-m.unhealthy
+	assert.Equal(t, HealthEventGPULost, event.EventType)
+	assert.Len(t, event.Devices, 2)
+}
+
+func TestResolveDeviceByEventAddressUnknownPCIBus(t *testing.T) {
+	// Parent GPU is in the UUID index but its PCI bus is absent from the
+	// allocatable inventory: an inconsistent inventory must surface an error.
+	parent := &GpuInfo{UUID: "GPU-parent-1", pciBusID: "0000:01:00.0"}
+	monitor := &nvmlDeviceHealthMonitor{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{},
+		},
+		gpuInfosByUUID: map[string]*GpuInfo{parent.UUID: parent},
+	}
+
+	_, err := monitor.resolveDeviceByEventAddress(parent.UUID, nil, FullGPUInstanceID, FullGPUInstanceID)
+	require.ErrorContains(t, err, "failed to find PCI Bus ID")
+}
+
 func TestGetDeviceIncludesHealthTaints(t *testing.T) {
 	dev := &AllocatableDevice{Gpu: &GpuInfo{
 		UUID:                  "GPU-1",
