@@ -80,6 +80,10 @@ type ComputeDomainDaemonSettings struct {
 	rootDir         string
 	configTmplPath  string
 	nodesConfigPath string
+
+	// templateSourcePath is where the daemon config template is read from. It is
+	// only ever the path below outside of tests.
+	templateSourcePath string
 }
 
 func NewComputeDomainManager(config *Config, getCliqueIDFunc func() (string, error)) (*ComputeDomainManager, error) {
@@ -194,11 +198,12 @@ func (m *ComputeDomainManager) NewSettings(domainID string) (*ComputeDomainDaemo
 		return nil, fmt.Errorf("invalid domainID: %w", err)
 	}
 	return &ComputeDomainDaemonSettings{
-		manager:         m,
-		domainID:        domainID,
-		rootDir:         filepath.Join(m.configFilesRoot, domainID),
-		configTmplPath:  filepath.Join(m.configFilesRoot, domainID, "imexd.cfg.tmpl"),
-		nodesConfigPath: filepath.Join(m.configFilesRoot, domainID, "nodes.cfg"),
+		manager:            m,
+		domainID:           domainID,
+		rootDir:            filepath.Join(m.configFilesRoot, domainID),
+		configTmplPath:     filepath.Join(m.configFilesRoot, domainID, "imexd.cfg.tmpl"),
+		nodesConfigPath:    filepath.Join(m.configFilesRoot, domainID, "nodes.cfg"),
+		templateSourcePath: ComputeDomainDaemonConfigTemplatePath,
 	}, nil
 }
 
@@ -259,10 +264,6 @@ func (s *ComputeDomainDaemonSettings) GetCDIContainerEditsForImex(ctx context.Co
 }
 
 func (s *ComputeDomainDaemonSettings) Prepare(ctx context.Context) error {
-	if err := os.MkdirAll(s.rootDir, 0755); err != nil {
-		return fmt.Errorf("error creating directory %v: %w", s.rootDir, err)
-	}
-
 	if err := s.WriteConfigFile(ctx); err != nil {
 		return fmt.Errorf("error writing config file %v: %w", s.configTmplPath, err)
 	}
@@ -286,12 +287,36 @@ func (s *ComputeDomainDaemonSettings) Unprepare(ctx context.Context) error {
 }
 
 func (s *ComputeDomainDaemonSettings) WriteConfigFile(ctx context.Context) error {
-	configBytes, err := os.ReadFile(ComputeDomainDaemonConfigTemplatePath)
+	configBytes, err := os.ReadFile(s.templateSourcePath)
 	if err != nil {
 		return fmt.Errorf("error reading template file: %w", err)
 	}
 
-	if err := os.WriteFile(s.configTmplPath, configBytes, 0644); err != nil {
+	// The per-domain directory is bind-mounted read-write into the daemon container, so write
+	// through an os.Root scoped to that directory: a symlink there can't redirect the write to
+	// another domain's directory or outside the config root. This assumes the config root and
+	// the per-domain directory entry itself stay ours; the daemon is given the contents of its
+	// own directory, not the entry in the parent. os.Root is not a filesystem sandbox and says
+	// nothing about mounts already in place underneath it.
+	if err := os.MkdirAll(s.manager.configFilesRoot, 0755); err != nil {
+		return fmt.Errorf("error creating config root %v: %w", s.manager.configFilesRoot, err)
+	}
+	configRoot, err := os.OpenRoot(s.manager.configFilesRoot)
+	if err != nil {
+		return fmt.Errorf("error opening config root %v: %w", s.manager.configFilesRoot, err)
+	}
+	defer configRoot.Close()
+
+	if err := configRoot.MkdirAll(s.domainID, 0755); err != nil {
+		return fmt.Errorf("error creating ComputeDomain daemon directory: %w", err)
+	}
+	domainRoot, err := configRoot.OpenRoot(s.domainID)
+	if err != nil {
+		return fmt.Errorf("error opening ComputeDomain daemon directory: %w", err)
+	}
+	defer domainRoot.Close()
+
+	if err := domainRoot.WriteFile("imexd.cfg.tmpl", configBytes, 0644); err != nil {
 		return fmt.Errorf("error writing config file %v: %w", s.configTmplPath, err)
 	}
 
