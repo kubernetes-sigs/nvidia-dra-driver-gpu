@@ -13,7 +13,7 @@ spec:
   matchConditions:
   - name: isRestrictedUser
     expression: >-
-      request.userInfo.username == "system:serviceaccount:{{ include "dra-driver-nvidia-gpu.namespace" . }}:{{ include "dra-driver-nvidia-gpu.serviceAccountName" . }}"
+      request.userInfo.username == "system:serviceaccount:{{ include "dra-driver-nvidia-gpu.namespace" . }}:{{ include "dra-driver-nvidia-gpu.serviceAccountName" . }}-kubeletplugin"
   variables:
   - name: userNodeName
     expression: >-

@@ -32,7 +32,7 @@ CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := golangci-lint check-generate
 
-MAKE_TARGETS := binaries build build-image check clean fmt lint-internal test examples cmds coverage generate vendor check-modules helm-lint helm-package $(CHECK_TARGETS)
+MAKE_TARGETS := binaries build build-image check clean fmt lint-internal test examples cmds coverage generate vendor check-modules helm-lint helm-test helm-package $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
 
@@ -92,8 +92,11 @@ golangci-lint:
 
 lint-internal: golangci-lint
 
-helm-lint:
+helm-lint: helm-test
 	helm lint deployments/helm/dra-driver-nvidia-gpu
+
+helm-test:
+	hack/test-helm-policy-service-account.sh
 
 helm-package:
 	helm package deployments/helm/dra-driver-nvidia-gpu
