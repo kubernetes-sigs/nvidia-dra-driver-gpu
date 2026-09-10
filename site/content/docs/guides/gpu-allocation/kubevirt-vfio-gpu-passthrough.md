@@ -26,7 +26,7 @@ Refer to the [feature gates reference](../../reference/feature-gates.md) and [co
 ## Prerequisites
 
 - Meet the general driver [prerequisites](../../prerequisites.md).
-- **IOMMU enabled** on GPU nodes. VFIO passthrough requires IOMMU; the GPU kubelet plugin fails to start with `PassthroughSupport` enabled if IOMMU is off.
+- **IOMMU enabled** on GPU nodes intended for VFIO passthrough. Without IOMMU, the GPU kubelet plugin continues serving normal GPU devices but does not advertise VFIO devices.
 - Enable the `PassthroughSupport` and `DeviceMetadata` feature gates in the DRA Driver.
 - Use **KubeVirt v1.8.0 or later** with the **`GPUsWithDRA`** feature gate enabled. This gate is enabled by default from KubeVirt v1.9.0, so it only needs to be set explicitly on v1.8.x.
 

@@ -61,14 +61,6 @@ type VfioPciManager struct {
 }
 
 func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) (*VfioPciManager, error) {
-	iommuEnabled, err := checkIommuEnabled(nvlib.hostRoot)
-	if err != nil {
-		return nil, fmt.Errorf("error checking if IOMMU is enabled: %w", err)
-	}
-	if !iommuEnabled {
-		return nil, fmt.Errorf("IOMMU is not enabled in the kernel")
-	}
-
 	vm := &VfioPciManager{
 		containerDriverRoot:    containerDriverRoot,
 		hostDriverRoot:         hostDriverRoot,

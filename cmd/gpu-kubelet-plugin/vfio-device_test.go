@@ -27,6 +27,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCheckIommuEnabled(t *testing.T) {
+	tests := map[string]struct {
+		setup       func(t *testing.T, path string)
+		wantEnabled bool
+		wantErr     bool
+	}{
+		"missing iommu groups": {},
+		"empty iommu groups": {
+			setup: func(t *testing.T, path string) {
+				require.NoError(t, os.MkdirAll(path, 0o755))
+			},
+		},
+		"populated iommu groups": {
+			setup: func(t *testing.T, path string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(path, "0"), 0o755))
+			},
+			wantEnabled: true,
+		},
+		"unexpected read error": {
+			setup: func(t *testing.T, path string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, nil, 0o644))
+			},
+			wantErr: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			hostRoot := t.TempDir()
+			iommuGroupsPath := filepath.Join(hostRoot, kernelIommuGroupPath)
+			if tc.setup != nil {
+				tc.setup(t, iommuGroupsPath)
+			}
+
+			enabled, err := checkIommuEnabled(hostRoot)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantEnabled, enabled)
+		})
+	}
+}
+
 func TestGetDriver(t *testing.T) {
 	t.Run("returns empty driver", func(t *testing.T) {
 		pciDevicesPath := t.TempDir()
