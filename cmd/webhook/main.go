@@ -266,12 +266,22 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 			configInterface = castConfig
 		case *nvapi.VfioDeviceConfig:
 			configInterface = castConfig
+		case *nvapi.LocalIPCConfig:
+			configInterface = castConfig
 		case *nvapi.ComputeDomainChannelConfig:
 			configInterface = castConfig
 		case *nvapi.ComputeDomainDaemonConfig:
 			configInterface = castConfig
 		default:
 			errs = append(errs, fmt.Errorf("expected a recognized configuration type at %s but got: %T", fieldPath, decodedConfig))
+			continue
+		}
+
+		// LocalIPCConfig is claim-scoped, but Requests is outside the opaque
+		// object and cannot be checked by LocalIPCConfig.Validate.
+		if _, ok := decodedConfig.(*nvapi.LocalIPCConfig); ok && len(config.Requests) != 0 {
+			requestsPath := fmt.Sprintf("%s.devices.config[%d].requests", specPath, configIndex)
+			errs = append(errs, fmt.Errorf("local IPC config at %s must not select individual requests", requestsPath))
 			continue
 		}
 

@@ -117,6 +117,28 @@ iommu:
 Requires [`PassthroughSupport`](feature-gates.md) (Alpha, default: false). `iommu.enableAPIDevice` additionally requires [`DeviceMetadata`](feature-gates.md) (Alpha, default: false).
 {{% /alert %}}
 
+### LocalIPCConfig
+
+Enables a writable directory scoped to an entire ResourceClaim for same-node IPC. It must not specify `requests`: every container consuming any device from the ResourceClaim receives the same directory.
+
+```yaml
+apiVersion: resource.nvidia.com/v1beta1
+kind: LocalIPCConfig
+enabled: true
+```
+
+#### Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | When `true`, exposes the directory at `/run/nvidia-dra/local-ipc`. Defaults to `false` and requires the [`LocalIPCDirectory`](feature-gates.md) feature gate. |
+
+The driver injects the directory through CDI and sets `NVIDIA_DRA_LOCAL_IPC_DIR=/run/nvidia-dra/local-ipc`. Workload Pods do not need `hostPath` or `hostIPC` for this rendezvous. The driver provides only the directory; applications own their socket protocol, file permissions, and transferred handles.
+
+When claim-wide configurations are provided by both a DeviceClass and a ResourceClaim, the ResourceClaim configuration takes precedence.
+
+When the feature gate is disabled, new preparations with `enabled: true` are rejected. The driver continues to restore and remove directories for claims already in `PrepareCompleted` until they are unprepared.
+
 ## ComputeDomain CRDs
 
 ComputeDomains use two Custom Resource Definitions. Unlike the GPU opaque types above, these are concrete Kubernetes resources that exist independently of `ResourceClaim` specs.

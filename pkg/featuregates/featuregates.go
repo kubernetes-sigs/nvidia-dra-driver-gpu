@@ -103,6 +103,10 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// LocalIPCDirectory allows a claim-scoped directory to be injected into
+	// workload containers for same-node local IPC.
+	LocalIPCDirectory featuregate.Feature = "LocalIPCDirectory"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -203,6 +207,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	LocalIPCDirectory: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
 		},
 	},
 }

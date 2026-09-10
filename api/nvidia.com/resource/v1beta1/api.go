@@ -30,6 +30,7 @@ const (
 	GpuConfigKind                  = "GpuConfig"
 	MigDeviceConfigKind            = "MigDeviceConfig"
 	VfioDeviceConfigKind           = "VfioDeviceConfig"
+	LocalIPCConfigKind             = "LocalIPCConfig"
 	ComputeDomainChannelConfigKind = "ComputeDomainChannelConfig"
 	ComputeDomainDaemonConfigKind  = "ComputeDomainDaemonConfig"
 	ComputeDomainKind              = "ComputeDomain"
@@ -69,6 +70,7 @@ func init() {
 		&GpuConfig{},
 		&MigDeviceConfig{},
 		&VfioDeviceConfig{},
+		&LocalIPCConfig{},
 		&ComputeDomainChannelConfig{},
 		&ComputeDomainDaemonConfig{},
 		&ComputeDomain{},

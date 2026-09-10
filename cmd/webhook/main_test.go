@@ -86,6 +86,35 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 			),
 			expectedAllowed: true,
 		},
+		"valid LocalIPCConfig in ResourceClaim": {
+			featureGates: map[string]bool{
+				string(featuregates.LocalIPCDirectory): true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithLocalIPCConfig(resourceClaimResourceV1Beta1),
+			),
+			expectedAllowed: true,
+		},
+		"LocalIPCConfig rejected when LocalIPCDirectory feature gate is disabled": {
+			featureGates: map[string]bool{
+				string(featuregates.LocalIPCDirectory): false,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithLocalIPCConfig(resourceClaimResourceV1Beta1),
+			),
+			expectedAllowed: false,
+			expectedMessage: `1 configs failed to validate: object at spec.devices.config[0].opaque.parameters is invalid: local IPC directory is requested, but the "LocalIPCDirectory" feature gate is not enabled`,
+		},
+		"LocalIPCConfig rejected when scoped to a request": {
+			featureGates: map[string]bool{
+				string(featuregates.LocalIPCDirectory): true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithLocalIPCConfig(resourceClaimResourceV1Beta1, "gpu"),
+			),
+			expectedAllowed: false,
+			expectedMessage: "1 configs failed to validate: local IPC config at spec.devices.config[0].requests must not select individual requests",
+		},
 		"invalid GpuConfigs in ResourceClaim": {
 			featureGates: map[string]bool{
 				string(featuregates.TimeSlicingSettings): true,
@@ -507,6 +536,36 @@ func resourceClaimWithGpuConfigs(gvr metav1.GroupVersionResource, gpuConfigs ...
 		Spec: resourceClaimSpecWithGpuConfigs(gpuConfigs...),
 	}
 	return resourceClaim
+}
+
+func resourceClaimWithLocalIPCConfig(gvr metav1.GroupVersionResource, requests ...string) *resourceapi.ResourceClaim {
+	config := &configapi.LocalIPCConfig{Enabled: true}
+	config.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   configapi.GroupName,
+		Version: configapi.Version,
+		Kind:    configapi.LocalIPCConfigKind,
+	})
+	return &resourceapi.ResourceClaim{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: gvr.Group + "/" + gvr.Version,
+			Kind:       "ResourceClaim",
+		},
+		Spec: resourceapi.ResourceClaimSpec{
+			Devices: resourceapi.DeviceClaim{
+				Config: []resourceapi.DeviceClaimConfiguration{{
+					Requests: requests,
+					DeviceConfiguration: resourceapi.DeviceConfiguration{
+						Opaque: &resourceapi.OpaqueDeviceConfiguration{
+							Driver: DriverName,
+							Parameters: runtime.RawExtension{
+								Object: config,
+							},
+						},
+					},
+				}},
+			},
+		},
+	}
 }
 
 func resourceClaimTemplateWithGpuConfigs(gvr metav1.GroupVersionResource, gpuConfigs ...*configapi.GpuConfig) *resourceapi.ResourceClaimTemplate {
