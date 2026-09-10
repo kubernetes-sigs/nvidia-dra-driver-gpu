@@ -3,8 +3,9 @@ title: GPU health checking
 linkTitle: GPU health checking
 weight: 60
 description: >
-  Monitor GPU health using NVML and apply device taints to prevent new workloads
-  from scheduling on unhealthy GPUs.
+  Monitor GPU health using NVML, apply device taints to prevent new workloads
+  from scheduling on unhealthy GPUs, and report the health of allocated GPUs
+  in the pod status.
 ---
 
 The `NVMLDeviceHealthCheck` feature gate enables continuous GPU health monitoring
@@ -16,7 +17,9 @@ signaling the Kubernetes scheduler to avoid placing new workloads on the affecte
 device.
 
 With this feature enabled, unhealthy devices are tainted in the
-`ResourceSlice` so the scheduler stops placing new workloads on them.
+`ResourceSlice` so the scheduler stops placing new workloads on them, and the
+health of every GPU allocated to a pod is reported to the kubelet, which
+surfaces it in the pod status.
 
 ## Feature status
 
@@ -26,8 +29,8 @@ With this feature enabled, unhealthy devices are tainted in the
 |---|---|---|---|
 | `NVMLDeviceHealthCheck` | `false` | Alpha | v0.4.0 |
 
-`NVMLDeviceHealthCheck` is mutually exclusive with the `DynamicMIG`,
-`PassthroughSupport`, and `MPSSupport` feature gates.
+`NVMLDeviceHealthCheck` is mutually exclusive with the `PassthroughSupport`
+feature gate.
 Refer to the [feature gate constraints](../reference/feature-gates/#constraints) documentation for more details.
 
 ## Prerequisites
@@ -37,6 +40,12 @@ Refer to the [feature gate constraints](../reference/feature-gates/#constraints)
   `kube-controller-manager`, and `kube-scheduler`.
   In Kubernetes v1.34 and 1.35, `DRADeviceTaints` is disabled by default and must be explicitly enabled.
   In Kubernetes v1.36, the feature gate is enabled by default.
+- For device health in the pod status, the
+  [`ResourceHealthStatus`](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)
+  Kubernetes feature gate must be enabled on the kubelet.
+  In Kubernetes v1.31 to v1.35, `ResourceHealthStatus` is disabled by default and must be explicitly enabled.
+  In Kubernetes v1.36, the feature gate is enabled by default.
+  Without it, the driver still taints unhealthy devices, but the pod status does not report device health.
 - NVIDIA DRA driver v0.4.0 or later installed via Helm.
 
 ## How it works
@@ -92,6 +101,64 @@ The following table identifies these errors:
 | 109 | Context Switch Timeout Error |
 
 You can classify additional XID errors as non-fatal by specifying a comma-separated list in the `--additional-xids-to-ignore` CLI argument or the `ADDITIONAL_XIDS_TO_IGNORE` environment variable.
+
+## Device health in the pod status
+
+The GPU kubelet plugin also reports the health of its devices to the kubelet
+through the DRA device health API
+([KEP-4680](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/4680-dra-resource-health)).
+The kubelet shows the health of every device allocated to a container in
+`pod.status.containerStatuses[].allocatedResourcesStatus`, so a workload owner
+can see that the GPU their pod is running on failed without access to the
+`ResourceSlice`.
+
+The reported health is derived from the same device taints described above, so
+the pod status and the `ResourceSlice` never disagree:
+
+| Device taints | Reported health | Message |
+|---|---|---|
+| `gpu.nvidia.com/xid` with effect `NoSchedule` | `Unhealthy` | `critical XID <code> reported by NVML` |
+| `gpu.nvidia.com/gpu-lost` | `Unhealthy` | `GPU is lost` |
+| `gpu.nvidia.com/unmonitored` | `Unknown` | `device health is not monitored` |
+| `gpu.nvidia.com/xid` with effect `None` | `Healthy` | `non-fatal XID <code> reported by NVML` |
+| No health taints | `Healthy` | |
+
+Once a device is `Unhealthy`, it stays `Unhealthy` until the taint is cleared
+(see [Recovering from an unhealthy device](#recovering-from-an-unhealthy-device)).
+A later non-fatal XID does not mask an unrecovered critical failure.
+
+The driver re-sends the health of all devices whenever the NVML event monitor
+confirms it is alive, well within the kubelet's health check timeout of 30
+seconds. If the monitor stops responding, the kubelet lets the reported health
+expire and shows the devices as `Unknown` rather than trusting stale data.
+
+To view the health of the GPUs allocated to a pod:
+
+```bash
+kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].allocatedResourcesStatus}' | jq
+```
+
+The following output shows a pod whose GPU reported a fatal XID:
+
+```json
+[
+  {
+    "name": "claim:gpu",
+    "resources": [
+      {
+        "health": "Unhealthy",
+        "message": "critical XID 79 reported by NVML",
+        "resourceID": "k8s.gpu.nvidia.com/claim=a85e5873-fc49-4554-a151-de159f528a04-gpu-0"
+      }
+    ]
+  }
+]
+```
+
+The `name` field identifies the pod's resource claim and the `resourceID`
+field identifies the allocated device. The `message` field requires the
+`ResourceHealthStatusMessage` kubelet feature gate, enabled by default in
+Kubernetes v1.36.
 
 ## Enabling the feature
 
@@ -164,7 +231,7 @@ To clear taints after a hardware issue is resolved:
 kubectl rollout restart daemonset/dra-driver-nvidia-gpu-kubelet-plugin -n dra-driver-nvidia-gpu
 ```
 
-On restart, the GPU kubelet plugin re-evaluates device health. Devices with no active NVML health events will not receive taints.
+On restart, the GPU kubelet plugin re-evaluates device health. Devices with no active NVML health events will not receive taints, and the pod status reports them as `Healthy` again.
 
 > [!NOTE]
 >
@@ -186,10 +253,11 @@ objects to manually remove or override device taints without restarting the driv
   `DeviceTaintRule` override. The driver does not clear taints when hardware
   recovers.
 - **One taint per key per device**: Each device holds at most one taint per taint
-  key. If multiple XID events occur on the same device, only the most recent value
-  is retained.
-- **Mutually exclusive feature gates**: Cannot be used with `DynamicMIG`,
-  `PassthroughSupport`, or `MPSSupport`.
+  key. If multiple XID events occur on the same device, the most recent value is
+  retained, except that a later event never weakens the taint: a device tainted
+  `NoSchedule` by a fatal XID keeps that taint and XID code when a non-fatal XID
+  follows.
+- **Mutually exclusive feature gates**: Cannot be used with `PassthroughSupport`.
 - **Publish failure handling**: If the driver fails to update the `ResourceSlice`
   after a health event (for example, due to a transient API server error), the
   failure is logged but not retried. The `ResourceSlice` may remain stale until

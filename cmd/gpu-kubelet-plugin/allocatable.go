@@ -40,6 +40,21 @@ type DeviceName = string
 type PCIBusID = string
 
 type AllocatableDevices map[DeviceName]*AllocatableDevice
+
+// PerGPUAllocatableDevices holds the allocatable devices grouped by physical
+// GPU.
+//
+// Concurrency: allocatablesMap is populated during device discovery, before
+// any goroutine reads it. After that it is mutated only under the DeviceState
+// lock, and only by the PassthroughSupport claim paths that swap a GPU and
+// its VFIO sibling (RemoveSiblingDevices, AddAllocatableDevice via
+// discoverSiblingAllocatables). The NVML health monitor's event loop reads
+// the map without the lock (sendHealthEventForAllDevices,
+// resolveDevicesByEventAddress); that is safe only because
+// NVMLDeviceHealthCheck is mutually exclusive with PassthroughSupport, so the
+// map is immutable whenever the monitor runs. A feature that mutates the map
+// at runtime while the health monitor is enabled must also make those reads
+// take the lock.
 type PerGPUAllocatableDevices struct {
 	allocatablesMap map[PCIBusID]AllocatableDevices
 }
@@ -347,10 +362,34 @@ func (d *AllocatableDevice) Taints() []resourceapi.DeviceTaint {
 	return slices.Clone(d.taints)
 }
 
+// taintEffectSeverity orders taint effects so that a later event can never
+// weaken a taint: None < NoSchedule < NoExecute.
+func taintEffectSeverity(effect resourceapi.DeviceTaintEffect) int {
+	switch effect {
+	case resourceapi.DeviceTaintEffectNoExecute:
+		return 2
+	case resourceapi.DeviceTaintEffectNoSchedule:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // AddOrUpdateTaint adds a new taint or updates an existing one with the same
-// key. The value and effect are always updated to the latest event received.
-// Meaning, if a device receives multiple events for the same taint dimension
-// (e.g., XID 48 followed by XID 63), the value is overwritten and only the most recent event data is retained.
+// key. A later event for the same taint dimension replaces the value and
+// effect (e.g., XID 48 followed by XID 63 keeps only 63) unless it would
+// weaken the effect: a device tainted NoSchedule by a critical event stays
+// NoSchedule (and keeps that event's value) when a later non-fatal event
+// arrives, because a non-fatal event is no evidence that the critical
+// failure was fixed.
+//
+// The never-weaken rule is required by device health reporting (KEP-4680):
+// the health reported to the kubelet is derived from these taints
+// (deviceHealthFromTaints) so that the ResourceSlice (KEP-5055) and the pod
+// status share one source of truth. If a non-fatal event could overwrite a
+// NoSchedule taint, the pod status would flip from Unhealthy to Healthy on a
+// GPU that is still broken; the only alternative would be a second, sticky
+// health state next to the taints.
 // Returns true if the taint set was modified.
 func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) bool {
 	for i, existing := range d.taints {
@@ -361,7 +400,12 @@ func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) boo
 				return false
 			}
 
-			// 2. Otherwise, update the fields and the timestamp
+			// 2. Never downgrade the effect of an existing taint.
+			if taintEffectSeverity(taint.Effect) < taintEffectSeverity(existing.Effect) {
+				return false
+			}
+
+			// 3. Otherwise, update the fields and the timestamp
 			d.taints[i].Value = taint.Value
 			d.taints[i].Effect = taint.Effect
 			d.taints[i].TimeAdded = nil // reset timestamp for the API server
@@ -369,7 +413,7 @@ func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) boo
 		}
 	}
 
-	// 3. Key doesn't exist yet, append the dereferenced struct
+	// 4. Key doesn't exist yet, append the dereferenced struct
 	d.taints = append(d.taints, *taint)
 	return true
 }

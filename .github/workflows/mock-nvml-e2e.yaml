@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: NVIDIA/k8s-test-infra
-          ref: 1275802ba689f3e40be78d15859123c21d3271c4
+          ref: a0e943af97a10434e29478e4a33755e10ffc66a7
           path: _k8s-test-infra
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
