@@ -348,16 +348,19 @@ func (d *AllocatableDevice) Taints() []resourceapi.DeviceTaint {
 }
 
 // AddOrUpdateTaint adds a new taint or updates an existing one with the same
-// key. The value and effect are always updated to the latest event received.
-// Meaning, if a device receives multiple events for the same taint dimension
-// (e.g., XID 48 followed by XID 63), the value is overwritten and only the most recent event data is retained.
+// key. NoSchedule taints are sticky and remain unchanged until explicit
+// recovery removes them.
 // Returns true if the taint set was modified.
 func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) bool {
 	for i, existing := range d.taints {
 		if existing.Key == taint.Key {
-
 			// 1. If nothing actually changed, exit early to avoid API calls
 			if existing.Value == taint.Value && existing.Effect == taint.Effect {
+				return false
+			}
+
+			// Keep the NoSchedule taint until recovery explicitly removes the taint.
+			if existing.Effect == resourceapi.DeviceTaintEffectNoSchedule {
 				return false
 			}
 

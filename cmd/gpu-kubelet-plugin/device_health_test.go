@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
@@ -27,6 +28,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type mockNVMLDevice struct {
+	nvml.Device
+	getFieldValuesFunc  func([]nvml.FieldValue) nvml.Return
+	getFieldValuesCalls int
+}
+
+func (m *mockNVMLDevice) GetFieldValues(values []nvml.FieldValue) nvml.Return {
+	m.getFieldValuesCalls++
+	return m.getFieldValuesFunc(values)
+}
+
+type mockNVMLLibrary struct {
+	nvml.Interface
+	deviceGetHandleByPciBusIdFunc  func(string) (nvml.Device, nvml.Return)
+	deviceGetHandleByPciBusIdCalls int
+}
+
+func (m *mockNVMLLibrary) DeviceGetHandleByPciBusId(busID string) (nvml.Device, nvml.Return) {
+	m.deviceGetHandleByPciBusIdCalls++
+	return m.deviceGetHandleByPciBusIdFunc(busID)
+}
 
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
 type mockHealthMonitor struct {
@@ -74,23 +97,43 @@ func TestAddOrUpdateTaint_DuplicateNoChange(t *testing.T) {
 	assert.Len(t, dev.Taints(), 1)
 }
 
-func TestAddOrUpdateTaint_UpdateValue(t *testing.T) {
-	dev := &AllocatableDevice{}
-	dev.AddOrUpdateTaint(&resourceapi.DeviceTaint{
-		Key:    TaintKeyXID,
-		Value:  "48",
-		Effect: resourceapi.DeviceTaintEffectNoSchedule,
-	})
+func TestAddOrUpdateTaint_NoScheduleIsSticky(t *testing.T) {
+	tests := []struct {
+		name     string
+		incoming resourceapi.DeviceTaint
+	}{
+		{
+			name: "later NoSchedule XID",
+			incoming: resourceapi.DeviceTaint{
+				Key:    TaintKeyXID,
+				Value:  "63",
+				Effect: resourceapi.DeviceTaintEffectNoSchedule,
+			},
+		},
+		{
+			name: "later informational XID",
+			incoming: resourceapi.DeviceTaint{
+				Key:    TaintKeyXID,
+				Value:  "43",
+				Effect: resourceapi.DeviceTaintEffectNone,
+			},
+		},
+	}
 
-	changed := dev.AddOrUpdateTaint(&resourceapi.DeviceTaint{
-		Key:    TaintKeyXID,
-		Value:  "63",
-		Effect: resourceapi.DeviceTaintEffectNoSchedule,
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			original := resourceapi.DeviceTaint{
+				Key:    TaintKeyXID,
+				Value:  "48",
+				Effect: resourceapi.DeviceTaintEffectNoSchedule,
+			}
+			dev := &AllocatableDevice{}
+			require.True(t, dev.AddOrUpdateTaint(&original))
 
-	require.True(t, changed)
-	require.Len(t, dev.Taints(), 1)
-	assert.Equal(t, "63", dev.Taints()[0].Value, "value should be overwritten to latest XID")
+			assert.False(t, dev.AddOrUpdateTaint(&tc.incoming))
+			assert.Equal(t, []resourceapi.DeviceTaint{original}, dev.Taints())
+		})
+	}
 }
 
 func TestAddOrUpdateTaint_UpdateEffect(t *testing.T) {
@@ -260,55 +303,274 @@ func TestHealthEventToTaint(t *testing.T) {
 	}
 }
 
-func TestIsEventNonFatal(t *testing.T) {
-	m := &nvmlDeviceHealthMonitor{
-		skippedXids: map[uint64]bool{
-			13: true,
-			31: true,
-			43: true,
+func newMockRecoveryActionDevice(
+	t *testing.T,
+	action nvml.DeviceGpuRecoveryAction,
+	queryRet nvml.Return,
+	fieldRet nvml.Return,
+	valueType nvml.ValueType,
+) *mockNVMLDevice {
+	t.Helper()
+
+	return &mockNVMLDevice{
+		getFieldValuesFunc: func(values []nvml.FieldValue) nvml.Return {
+			require.Len(t, values, 1)
+			require.EqualValues(t, nvml.FI_DEV_GET_GPU_RECOVERY_ACTION, values[0].FieldId)
+
+			if queryRet != nvml.SUCCESS {
+				return queryRet
+			}
+
+			values[0].NvmlReturn = uint32(fieldRet)
+			values[0].ValueType = uint32(valueType)
+			binary.NativeEndian.PutUint32(values[0].Value[:4], uint32(action))
+			return nvml.SUCCESS
 		},
 	}
+}
 
-	tests := []struct {
-		name     string
-		event    *DeviceHealthEvent
-		expected bool
+func TestXidsToSkip(t *testing.T) {
+	tests := map[string]struct {
+		input string
+		want  map[uint64]bool
 	}{
-		{
-			name: "skipped XID is non-fatal",
-			event: &DeviceHealthEvent{
-				EventType: HealthEventXID,
-				EventData: 13,
-			},
-			expected: true,
+		"empty input has no built-in defaults": {
+			want: map[uint64]bool{},
 		},
-		{
-			name: "non-skipped XID is fatal",
-			event: &DeviceHealthEvent{
-				EventType: HealthEventXID,
-				EventData: 48,
-			},
-			expected: false,
+		"configured XIDs": {
+			input: "13, 109",
+			want:  map[uint64]bool{13: true, 109: true},
 		},
-		{
-			name: "GPU_LOST is always fatal",
-			event: &DeviceHealthEvent{
-				EventType: HealthEventGPULost,
-			},
-			expected: false,
-		},
-		{
-			name: "unmonitored is not an XID event",
-			event: &DeviceHealthEvent{
-				EventType: HealthEventUnmonitored,
-			},
-			expected: false,
+		"malformed empty and duplicate values": {
+			input: "43,invalid,,43",
+			want:  map[uint64]bool{43: true},
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.expected, m.IsEventNonFatal(tc.event))
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, xidsToSkip(tc.input))
+		})
+	}
+}
+
+func TestQueryGPURecoveryAction(t *testing.T) {
+	tests := map[string]struct {
+		action    nvml.DeviceGpuRecoveryAction
+		queryRet  nvml.Return
+		fieldRet  nvml.Return
+		valueType nvml.ValueType
+		want      nvml.DeviceGpuRecoveryAction
+		wantErr   string
+	}{
+		"none": {
+			action:    nvml.GPU_RECOVERY_ACTION_NONE,
+			fieldRet:  nvml.SUCCESS,
+			valueType: nvml.VALUE_TYPE_UNSIGNED_INT,
+			want:      nvml.GPU_RECOVERY_ACTION_NONE,
+		},
+		"GPU reset": {
+			action:    nvml.GPU_RECOVERY_ACTION_GPU_RESET,
+			fieldRet:  nvml.SUCCESS,
+			valueType: nvml.VALUE_TYPE_UNSIGNED_INT,
+			want:      nvml.GPU_RECOVERY_ACTION_GPU_RESET,
+		},
+		"recover IMEX domain": {
+			action:    nvml.GPU_RECOVERY_ACTION_RECOVER_IMEX_DOMAIN,
+			fieldRet:  nvml.SUCCESS,
+			valueType: nvml.VALUE_TYPE_UNSIGNED_INT,
+			want:      nvml.GPU_RECOVERY_ACTION_RECOVER_IMEX_DOMAIN,
+		},
+		"unknown action": {
+			action:    nvml.DeviceGpuRecoveryAction(99),
+			fieldRet:  nvml.SUCCESS,
+			valueType: nvml.VALUE_TYPE_UNSIGNED_INT,
+			want:      nvml.DeviceGpuRecoveryAction(99),
+		},
+		"query failure": {
+			queryRet: nvml.ERROR_UNKNOWN,
+			wantErr:  "failed to query GPU recovery action",
+		},
+		"field failure": {
+			fieldRet:  nvml.ERROR_NOT_SUPPORTED,
+			valueType: nvml.VALUE_TYPE_UNSIGNED_INT,
+			wantErr:   "failed to read GPU recovery action field",
+		},
+		"unexpected value type": {
+			fieldRet:  nvml.SUCCESS,
+			valueType: nvml.VALUE_TYPE_DOUBLE,
+			wantErr:   "failed to decode GPU recovery action",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			device := newMockRecoveryActionDevice(t, tc.action, tc.queryRet, tc.fieldRet, tc.valueType)
+
+			got, err := queryGPURecoveryAction(device)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, 1, device.getFieldValuesCalls)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, 1, device.getFieldValuesCalls)
+		})
+	}
+}
+
+func TestIsEventNonFatal(t *testing.T) {
+	const (
+		pciBusID = "0000:01:00.0"
+		xid      = uint64(43)
+	)
+
+	tests := map[string]struct {
+		eventType DeviceHealthEventType
+		action    nvml.DeviceGpuRecoveryAction
+		ignored   bool
+		mig       bool
+		handleRet nvml.Return
+		queryRet  nvml.Return
+		fieldRet  nvml.Return
+		want      bool
+	}{
+		"recovery action none is non-fatal": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_NONE,
+			want:      true,
+		},
+		"MIG event queries the parent GPU": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_NONE,
+			mig:       true,
+			want:      true,
+		},
+		"GPU reset is fatal": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_GPU_RESET,
+		},
+		"node reboot is fatal": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_NODE_REBOOT,
+		},
+		"drain P2P is fatal": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_DRAIN_P2P,
+		},
+		"drain and reset is fatal": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_DRAIN_AND_RESET,
+		},
+		"recover IMEX domain is non-fatal for GPU scheduling": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_RECOVER_IMEX_DOMAIN,
+			want:      true,
+		},
+		"unknown non-zero action is fatal": {
+			eventType: HealthEventXID,
+			action:    nvml.DeviceGpuRecoveryAction(99),
+		},
+		"administrator override remains non-fatal": {
+			eventType: HealthEventXID,
+			action:    nvml.GPU_RECOVERY_ACTION_GPU_RESET,
+			ignored:   true,
+			want:      true,
+		},
+		"query failure is fatal": {
+			eventType: HealthEventXID,
+			queryRet:  nvml.ERROR_UNKNOWN,
+		},
+		"administrator override survives query failure": {
+			eventType: HealthEventXID,
+			ignored:   true,
+			queryRet:  nvml.ERROR_UNKNOWN,
+			want:      true,
+		},
+		"field failure is fatal": {
+			eventType: HealthEventXID,
+			fieldRet:  nvml.ERROR_NOT_SUPPORTED,
+		},
+		"parent handle failure is fatal": {
+			eventType: HealthEventXID,
+			handleRet: nvml.ERROR_INVALID_ARGUMENT,
+		},
+		"administrator override survives parent handle failure": {
+			eventType: HealthEventXID,
+			ignored:   true,
+			handleRet: nvml.ERROR_INVALID_ARGUMENT,
+			want:      true,
+		},
+		"GPU lost is not classified as a non-fatal XID": {
+			eventType: HealthEventGPULost,
+		},
+		"unmonitored is not classified as a non-fatal XID": {
+			eventType: HealthEventUnmonitored,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			parent := &GpuInfo{UUID: "GPU-parent-1", pciBusID: pciBusID}
+			affectedDevice := &AllocatableDevice{Gpu: parent}
+			if tc.mig {
+				affectedDevice = &AllocatableDevice{
+					MigStatic: &MigDeviceInfo{
+						ParentUUID: parent.UUID,
+						parent:     parent,
+					},
+				}
+			}
+
+			device := newMockRecoveryActionDevice(
+				t,
+				tc.action,
+				tc.queryRet,
+				tc.fieldRet,
+				nvml.VALUE_TYPE_UNSIGNED_INT,
+			)
+
+			nvmllib := &mockNVMLLibrary{
+				deviceGetHandleByPciBusIdFunc: func(got string) (nvml.Device, nvml.Return) {
+					assert.Equal(t, pciBusID, got)
+					if tc.handleRet != nvml.SUCCESS {
+						return nil, tc.handleRet
+					}
+					return device, nvml.SUCCESS
+				},
+			}
+
+			skippedXids := make(map[uint64]bool)
+			if tc.ignored {
+				skippedXids[xid] = true
+			}
+
+			monitor := &nvmlDeviceHealthMonitor{
+				nvmllib:     nvmllib,
+				skippedXids: skippedXids,
+			}
+			event := &DeviceHealthEvent{
+				EventType: tc.eventType,
+				EventData: xid,
+			}
+			if tc.eventType == HealthEventXID {
+				event.Devices = []*AllocatableDevice{affectedDevice}
+			}
+
+			assert.Equal(t, tc.want, monitor.IsEventNonFatal(event))
+
+			wantHandleCalls := 0
+			wantQueryCalls := 0
+			if tc.eventType == HealthEventXID {
+				wantHandleCalls = 1
+				if tc.handleRet == nvml.SUCCESS {
+					wantQueryCalls = 1
+				}
+			}
+			assert.Equal(t, wantHandleCalls, nvmllib.deviceGetHandleByPciBusIdCalls)
+			assert.Equal(t, wantQueryCalls, device.getFieldValuesCalls)
 		})
 	}
 }

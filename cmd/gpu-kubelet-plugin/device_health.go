@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"strconv"
 	"strings"
@@ -401,64 +402,135 @@ func (m *nvmlDeviceHealthMonitor) sendBatchedHealthEvent(devices []*AllocatableD
 	}
 }
 
-// getAdditionalXids returns a list of additional Xids to skip from the specified string.
-// The input is treated as a comma-separated string and all valid uint64 values are considered as Xid values.
-// Invalid values are ignored.
-// TODO: add list of EXPLICIT XIDs from [https://github.com/NVIDIA/k8s-device-plugin/pull/1443].
-func getAdditionalXids(input string) []uint64 {
-	if input == "" {
-		return nil
-	}
-
-	var additionalXids []uint64
-	klog.V(6).Infof("Creating a list of additional xids to ignore: [%s]", input)
-	for _, additionalXid := range strings.Split(input, ",") {
-		trimmed := strings.TrimSpace(additionalXid)
-		if trimmed == "" {
-			continue
-		}
-		xid, err := strconv.ParseUint(trimmed, 10, 64)
-		if err != nil {
-			klog.V(6).Infof("Ignoring malformed Xid value %v: %v", trimmed, err)
-			continue
-		}
-		additionalXids = append(additionalXids, xid)
-	}
-
-	return additionalXids
-}
-
-func xidsToSkip(additionalXids string) map[uint64]bool {
-	// Add the list of hardcoded disabled (ignored) XIDs:
-	// https://docs.nvidia.com/deploy/xid-errors/latest/analyzing-xid-catalog.html
-	// Application errors: the GPU should still be healthy.
-	// If you change this list, update the documentation.
-	ignoredXids := []uint64{
-		13,  // Graphics Engine Exception
-		31,  // GPU memory page fault
-		43,  // GPU stopped processing
-		45,  // Preemptive cleanup, due to previous errors
-		68,  // Video processor exception
-		109, // Context Switch Timeout Error
-	}
-
+// xidsToSkip returns the XIDs explicitly configured by the administrator.
+//
+// Earlier versions also treated the following XIDs as non-fatal by default.
+// The NVIDIA XID Catalog documents their immediate actions as:
+//
+//   - XID 13, Graphics Engine Exception: RESTART_APP.
+//   - XID 31, GPU memory page fault: RESTART_APP.
+//   - XID 43, GPU stopped processing: IGNORE.
+//   - XID 45, Preemptive cleanup due to previous errors: WORKFLOW_XID_45.
+//   - XID 68, NVDEC0 Exception: RESTART_APP.
+//   - XID 109, Context Switch Timeout Error: RESET_GPU.
+//
+// The built-in list is no longer used for classification. The parent GPU's
+// current recovery action determines the scheduling impact. This configured
+// list remains as an explicit administrator override.
+//
+// See:
+// https://docs.nvidia.com/deploy/xid-errors/latest/analyzing-xid-catalog.html
+func xidsToSkip(input string) map[uint64]bool {
 	skippedXids := make(map[uint64]bool)
-	for _, id := range ignoredXids {
-		skippedXids[id] = true
+	if input == "" {
+		return skippedXids
 	}
 
-	for _, additionalXid := range getAdditionalXids(additionalXids) {
-		skippedXids[additionalXid] = true
+	klog.V(6).Infof("Creating a list of XIDs to ignore: [%s]", input)
+
+	for _, value := range strings.Split(input, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+
+		xid, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			klog.V(6).Infof("Ignoring malformed XID value %q: %v", value, err)
+			continue
+		}
+
+		skippedXids[xid] = true
 	}
+
 	return skippedXids
 }
 
-// IsEventNonFatal evaluates whether a hardware event is considered an application-level
-// warning (None) rather than a critical hardware failure (NoSchedule).
-// Currently, it only checks for XID events.
-func (m *nvmlDeviceHealthMonitor) IsEventNonFatal(event *DeviceHealthEvent) bool {
-	if event.EventType == HealthEventXID {
-		return m.skippedXids[event.EventData]
+// queryGPURecoveryAction reads the current recovery action reported by NVML.
+func queryGPURecoveryAction(device nvml.Device) (nvml.DeviceGpuRecoveryAction, error) {
+	values := []nvml.FieldValue{{
+		FieldId: nvml.FI_DEV_GET_GPU_RECOVERY_ACTION,
+	}}
+
+	if ret := device.GetFieldValues(values); ret != nvml.SUCCESS {
+		return nvml.GPU_RECOVERY_ACTION_NONE, fmt.Errorf("failed to query GPU recovery action: %w", ret)
 	}
-	return false
+
+	value := values[0]
+	if ret := nvml.Return(value.NvmlReturn); ret != nvml.SUCCESS {
+		return nvml.GPU_RECOVERY_ACTION_NONE, fmt.Errorf("failed to read GPU recovery action field: %w", ret)
+	}
+	if nvml.ValueType(value.ValueType) != nvml.VALUE_TYPE_UNSIGNED_INT {
+		return nvml.GPU_RECOVERY_ACTION_NONE, fmt.Errorf("failed to decode GPU recovery action: unexpected value type %d", value.ValueType)
+	}
+
+	// NVML stores this unsigned-int field in the first four bytes of its 8-byte
+	// value union using host byte order.
+	return nvml.DeviceGpuRecoveryAction(binary.NativeEndian.Uint32(value.Value[:4])), nil
+}
+
+func gpuRecoveryActionString(action nvml.DeviceGpuRecoveryAction) string {
+	switch action {
+	case nvml.GPU_RECOVERY_ACTION_NONE:
+		return "None"
+	case nvml.GPU_RECOVERY_ACTION_GPU_RESET:
+		return "GPU Reset Required"
+	case nvml.GPU_RECOVERY_ACTION_NODE_REBOOT:
+		return "Node Reboot Required"
+	case nvml.GPU_RECOVERY_ACTION_DRAIN_P2P:
+		return "Drain P2P"
+	case nvml.GPU_RECOVERY_ACTION_DRAIN_AND_RESET:
+		return "Drain and Reset"
+	case nvml.GPU_RECOVERY_ACTION_RECOVER_IMEX_DOMAIN:
+		return "Recover IMEX Domain"
+	default:
+		return fmt.Sprintf("Unknown (%d)", action)
+	}
+}
+
+// IsEventNonFatal classifies an XID using the parent GPU's current recovery
+// action. An administrator-configured XID remains non-fatal, but the recovery
+// action is still queried and logged.
+func (m *nvmlDeviceHealthMonitor) IsEventNonFatal(event *DeviceHealthEvent) bool {
+	if event.EventType != HealthEventXID {
+		return false
+	}
+
+	xid := event.EventData
+	ignored := m.skippedXids[xid]
+
+	pciBusID := event.Devices[0].GetGPUPCIBusID()
+	device, ret := m.nvmllib.DeviceGetHandleByPciBusId(pciBusID)
+	if ret != nvml.SUCCESS {
+		klog.Warningf("Failed to get parent GPU handle for PCI bus ID %s while processing XID=%d: %v", pciBusID, xid, ret)
+		return ignored
+	}
+
+	action, err := queryGPURecoveryAction(device)
+	if err != nil {
+		klog.Warningf("Failed to query GPU recovery action while processing XID=%d: %v", xid, err)
+		return ignored
+	}
+
+	if ignored {
+		klog.Warningf("XID %d: NVML reported GPU recovery action=%q; treating the event as non-fatal because the XID is configured via --additional-xids-to-ignore", xid, gpuRecoveryActionString(action))
+		return true
+	}
+
+	switch action {
+	case nvml.GPU_RECOVERY_ACTION_NONE:
+		klog.V(4).Infof("XID %d: NVML reported GPU recovery action=%q; treating the event as non-fatal", xid, gpuRecoveryActionString(action))
+		return true
+
+	case nvml.GPU_RECOVERY_ACTION_RECOVER_IMEX_DOMAIN:
+		// RECOVER_IMEX_DOMAIN requests recovery of the IMEX domain rather than
+		// recovery of the local GPU device. Keep the XID informational for GPU
+		// scheduling and surface the recovery requirement in the log.
+		klog.Warningf("XID %d: NVML reports GPU recovery action=%q; the action is scoped to IMEX-domain recovery, so treating the event as non-fatal for GPU scheduling", xid, gpuRecoveryActionString(action))
+		return true
+
+	default:
+		klog.Warningf("XID %d: NVML reported GPU recovery action=%q; treating the event as fatal", xid, gpuRecoveryActionString(action))
+		return false
+	}
 }

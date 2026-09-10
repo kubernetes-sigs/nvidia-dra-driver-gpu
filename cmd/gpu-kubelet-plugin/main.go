@@ -190,9 +190,12 @@ func newApp() *cli.App {
 			EnvVars:     []string{"HEALTHCHECK_PORT"},
 		},
 		// TODO: change to StringSliceFlag.
+		// Retain the existing flag for an explicit administrator
+		// override: listed XIDs do not produce a NoSchedule taint even when NVML
+		// reports a GPU recovery action. The action is still queried and logged.
 		&cli.StringFlag{
 			Name:        "additional-xids-to-ignore",
-			Usage:       "A comma-separated list of additional XIDs to ignore.",
+			Usage:       "A comma-separated list of XIDs to treat as non-fatal, overriding the NVML-reported GPU recovery action.",
 			Value:       "",
 			Destination: &flags.additionalXidsToIgnore,
 			EnvVars:     []string{"ADDITIONAL_XIDS_TO_IGNORE"},
